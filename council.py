@@ -544,26 +544,47 @@ def main():
     a = build_parser().parse_args()
     if a.list_models:
         return list_models()
+    _validate_rounds(a)
     providers = _resolve_providers(a)
     question = _resolve_question(a)
     callers = resolve_callers(a.dry_run, providers)
     _run_and_report(a, question, _build_context(a), callers, providers)
 
 
+def _validate_rounds(a) -> None:
+    if a.rounds < 1:
+        build_parser().error("--rounds must be at least 1.")
+
+
 def _resolve_question(a) -> str:
-    question = Path(a.file).read_text(encoding="utf-8") if a.file else a.question
-    if question:
-        return question
-    question = input("Decision question: ").strip()
-    if not question:
+    question = _read_question_file(a.file) if a.file else a.question or _prompt_for_question()
+    if not question.strip():
         build_parser().error("No question given.")
     return question
+
+
+def _read_question_file(path_str: str) -> str:
+    try:
+        return Path(path_str).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        build_parser().error(f"Question file not found: {path_str}")
+    except OSError as e:
+        build_parser().error(f"Cannot read question file: {e}")
+
+
+def _prompt_for_question() -> str:
+    try:
+        return input("Decision question: ").strip()
+    except EOFError:
+        build_parser().error("No question given.")
 
 
 def _build_context(a) -> str:
     context = "\n\n".join(f"### {Path(p).name}\n{read_document(Path(p))}" for p in a.context)
     if a.context:
-        print(f"Included {len(a.context)} background file(s): {', '.join(Path(p).name for p in a.context)}")
+        dest = sys.stderr if getattr(a, "json_stream", False) else sys.stdout
+        names = ", ".join(Path(p).name for p in a.context)
+        print(f"Included {len(a.context)} background file(s): {names}", file=dest)
     return context
 
 
