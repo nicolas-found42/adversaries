@@ -11,12 +11,8 @@ permissions:
 
 jobs:
   check:
-    name: Lint · Type check · Code limit
+    name: Gates · tests · smoke
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.14", "3.15"]
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.1
@@ -24,25 +20,23 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.14"
           enable-cache: true
 
       - name: Install dependencies
         run: uv sync --locked --all-extras
 
-      - name: Ruff lint
-        run: uv run ruff check .
+      # Runs the same hooks as local pre-commit, so the flags live in exactly one
+      # place: .pre-commit-config.yaml. A hook that rewrites a file fails the run.
+      - name: Quality gates
+        run: uv run pre-commit run --all-files
 
-      - name: Ruff format check
-        run: uv run ruff format --check .
-
-      - name: ty type check
-        run: uv run ty check
-
-      - name: CodeLimit strict (max 15 lines per function)
+      # Advisory: reports complexity but never fails the build.
+      - name: Complexity report (radon + xenon)
+        continue-on-error: true
         run: |
-          uv run codelimit scan .
-          uv run python scripts/check_function_length.py
+          uv run radon cc -s -a .
+          uv run xenon --max-absolute B --max-modules B --max-average A .
 
       - name: Smoke test (dry run)
         run: uv run council.py --dry-run "CI smoke test question"

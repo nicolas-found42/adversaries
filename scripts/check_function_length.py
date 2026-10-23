@@ -38,14 +38,29 @@ def python_files(roots: list[Path]):
     return files
 
 
-def main(argv: list[str]) -> int:
-    max_lines = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else DEFAULT_MAX_LINES
-    roots = [Path(p) for p in argv[1:] if not p.isdigit()] or [Path(".")]
-    files = python_files(roots)
-    over = [(path, m) for path in files for m in measurements(path) if m.value > max_lines]
+def threshold(argv: list[str]) -> int:
+    return int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else DEFAULT_MAX_LINES
+
+
+def roots(argv: list[str]) -> list[Path]:
+    return [Path(p) for p in argv[1:] if not p.isdigit()] or [Path(".")]
+
+
+def violations(files: list[Path], max_lines: int):
+    return [(path, m) for path in files for m in measurements(path) if m.value > max_lines]
+
+
+def report(over, file_count: int, max_lines: int) -> None:
     for path, m in sorted(over, key=lambda item: -item[1].value):
         print(f"{path}:{m.start.line}: {m.value} lines — {m.unit_name} (max {max_lines})")
-    print(f"{len(files)} files checked, {len(over)} function(s) over {max_lines} lines.")
+    print(f"{file_count} files checked, {len(over)} function(s) over {max_lines} lines.")
+
+
+def main(argv: list[str]) -> int:
+    max_lines = threshold(argv)
+    files = python_files(roots(argv))
+    over = violations(files, max_lines)
+    report(over, len(files), max_lines)
     return 1 if over else 0
 
 

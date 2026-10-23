@@ -1,6 +1,10 @@
 # Adversarial Council
 
-A single-file Python CLI (`council.py`) that runs a red-team debate across Claude, Gemini, and OpenAI, then writes an executive decision brief.
+A single-file Python CLI (`council.py`) that runs a red-team debate across Mistral, OpenRouter, Ollama Cloud, and OpenCode Go, then writes an executive decision brief.
+
+## Quality gates
+
+Hooks in `.pre-commit-config.yaml` are walls: `uv run pre-commit run <hook-id> --all-files` while iterating, `uv run pre-commit run --all-files` before calling work done (CI runs the same hooks). Which wall owns which failure: `docs/agents/quality-gates.md`.
 
 ## Agent skills
 

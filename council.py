@@ -3,10 +3,10 @@
 Adversarial Council — executive decision support via a cross-model red-team chain.
 
 Flow (one round):
-    Claude (proposal) -> Gemini (attacks Claude) -> OpenAI (attacks Gemini) -> Claude (rebuts OpenAI)
-Then Claude writes a one-page executive decision brief from the whole debate.
+    Mistral (proposal) -> OpenRouter (attacks Mistral) -> Ollama Cloud (attacks OpenRouter) -> OpenCode Go (attacks Ollama Cloud) -> Mistral (rebuts)
+Then Mistral writes a one-page executive decision brief from the whole debate.
 
-With --rounds N > 1, the chain continues Gemini -> OpenAI -> Claude for extra loops before the brief.
+With --rounds N > 1, the chain repeats the attack and rebuttal loop for extra rounds before the brief.
 
 Usage:
     python council.py "Should we expand into Kenya in Q2 2027?"
@@ -25,7 +25,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 for _s in (sys.stdout, sys.stderr):  # Windows consoles default to a legacy codepage
@@ -33,18 +33,42 @@ for _s in (sys.stdout, sys.stderr):  # Windows consoles default to a legacy code
     if _reconfigure is not None:
         _reconfigure(encoding="utf-8", errors="replace")
 
-try:
-    from dotenv import load_dotenv
 
-    load_dotenv(Path(__file__).with_name(".env"))
-except ImportError:
-    pass
+def _load_env_files():
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).with_name(".env"))
+    except ImportError:
+        pass
+    _load_zshenv()
+
+
+def _load_zshenv():
+    zshenv = Path.home() / ".zshenv"
+    if not zshenv.is_file():
+        return
+    for line in zshenv.read_text(encoding="utf-8", errors="replace").splitlines():
+        _parse_export_line(line.strip())
+
+
+def _parse_export_line(line: str):
+    if not line.startswith("export "):
+        return
+    k, _, v = line.removeprefix("export ").partition("=")
+    k, v = k.strip(), v.strip("'\"")
+    if k and v and k not in os.environ:
+        os.environ[k] = v
+
+
+_load_env_files()
 
 # ---------------------------------------------------------------- config ---
 
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
+OLLAMA_CLOUD_MODEL = os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4.1-flash")
+OPENCODE_GO_MODEL = os.getenv("OPENCODE_GO_MODEL", os.getenv("OPENCODE_MODEL", "deepseek-v4.1-flash"))
 MAX_TOKENS = int(os.getenv("COUNCIL_MAX_TOKENS", "4000"))
 
 # ---------------------------------------------------------------- prompts --
@@ -143,7 +167,7 @@ say so. Do not introduce new arguments that weren't in the debate except to flag
 
 @dataclass
 class Turn:
-    model: str  # "Claude" | "Gemini" | "OpenAI"
+    model: str  # "Mistral" | "OpenRouter" | "Ollama-Cloud" | "OpenCode-Go"
     role: str  # "Opening" | "Red team" | "Rebuttal" | "Brief"
     text: str
     seconds: float
@@ -162,62 +186,51 @@ def _retry(fn, attempts=4) -> str:
     raise RuntimeError(f"_retry gave up after {attempts} attempt(s)")
 
 
-def call_claude(system: str, user: str) -> str:
-    import anthropic
-    from anthropic.types import TextBlock
-
-    client = anthropic.Anthropic()  # ANTHROPIC_API_KEY
-
-    def go():
-        msg = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=MAX_TOKENS,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        return "".join(block.text for block in msg.content if isinstance(block, TextBlock))
-
-    return _retry(go)
-
-
-def call_gemini(system: str, user: str) -> str:
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client()  # GEMINI_API_KEY or GOOGLE_API_KEY
-
-    def go():
-        r = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=user,
-            config=types.GenerateContentConfig(system_instruction=system, max_output_tokens=MAX_TOKENS * 2),
-        )
-        if not r.text:
-            raise RuntimeError(
-                f"Gemini returned no text (finish reason: {r.candidates[0].finish_reason if r.candidates else 'none'})"
-            )
-        return r.text
-
-    return _retry(go)
-
-
-def call_openai(system: str, user: str) -> str:
-    from openai import OpenAI
-
-    client = OpenAI()  # OPENAI_API_KEY
-
+def _chat_completion(client, model: str, system: str, user: str) -> str:
     def go():
         r = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_completion_tokens=MAX_TOKENS * 3,  # reasoning models spend tokens thinking
+            max_tokens=MAX_TOKENS,
         )
-        text = r.choices[0].message.content
+        msg = r.choices[0].message
+        text = msg.content or getattr(msg, "reasoning_content", "") or ""
         if not text:
-            raise RuntimeError("OpenAI returned no text (try raising COUNCIL_MAX_TOKENS)")
+            raise RuntimeError(f"{model} returned no text")
         return text
 
     return _retry(go)
+
+
+def call_mistral(system: str, user: str) -> str:
+    from openai import OpenAI
+
+    client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=os.environ.get("MISTRAL_API_KEY", ""))
+    return _chat_completion(client, MODEL_LABELS["Mistral"], system, user)
+
+
+def call_openrouter(system: str, user: str) -> str:
+    from openai import OpenAI
+
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY", ""))
+    return _chat_completion(client, MODEL_LABELS["OpenRouter"], system, user)
+
+
+def call_ollama_cloud(system: str, user: str) -> str:
+    from openai import OpenAI
+
+    key = os.getenv("OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY", "")
+    client = OpenAI(base_url="https://ollama.com/v1", api_key=key)
+    return _chat_completion(client, MODEL_LABELS["Ollama-Cloud"], system, user)
+
+
+def call_opencode_go(system: str, user: str) -> str:
+    from openai import OpenAI
+
+    key = os.getenv("OPENCODE_API_KEY") or os.getenv("OPENCODE_GO_API_KEY", "")
+    headers = {"x-opencode-session": "adversarial-council"}
+    client = OpenAI(base_url="https://opencode.ai/zen/go/v1", api_key=key, default_headers=headers)
+    return _chat_completion(client, MODEL_LABELS["OpenCode-Go"], system, user)
 
 
 def call_fake(name):
@@ -228,67 +241,102 @@ def call_fake(name):
     return f
 
 
-CALLERS = {"Claude": call_claude, "Gemini": call_gemini, "OpenAI": call_openai}
+CALLERS = {
+    "Mistral": call_mistral,
+    "OpenRouter": call_openrouter,
+    "Ollama-Cloud": call_ollama_cloud,
+    "OpenCode-Go": call_opencode_go,
+}
+MODEL_LABELS = {
+    "Mistral": MISTRAL_MODEL,
+    "OpenRouter": OPENROUTER_MODEL,
+    "Ollama-Cloud": OLLAMA_CLOUD_MODEL,
+    "OpenCode-Go": OPENCODE_GO_MODEL,
+}
+PROVIDER_ORDER = ("Mistral", "OpenRouter", "Ollama-Cloud", "OpenCode-Go")
 
 
 # --------------------------------------------------------------- pipeline --
 
 
-def transcript_text(question: str, context: str, turns: list[Turn]) -> str:
-    parts = [f"## DECISION QUESTION\n{question}"]
-    if context:
-        parts.append(f"## BACKGROUND MATERIAL (from the executive)\n{context}")
+@dataclass
+class Session:
+    question: str
+    context: str
+    callers: dict
+    rounds: int = 1
+    turns: list[Turn] = field(default_factory=list)
+    providers: tuple[str, ...] = PROVIDER_ORDER
+
+
+def transcript_text(session: Session, turns: list[Turn] | None = None) -> str:
+    turns = session.turns if turns is None else turns
+    parts = [f"## DECISION QUESTION\n{session.question}"]
+    if session.context:
+        parts.append(f"## BACKGROUND MATERIAL (from the executive)\n{session.context}")
     for i, t in enumerate(turns, 1):
         parts.append(f"## TURN {i} — {t.model} ({t.role})\n{t.text}")
     return "\n\n".join(parts)
 
 
-def run_turn(name: str, role: str, system: str, user: str, turns: list[Turn], callers) -> Turn:
-    label = {"Claude": CLAUDE_MODEL, "Gemini": GEMINI_MODEL, "OpenAI": OPENAI_MODEL}[name]
+def run_turn(session: Session, name: str, role: str, system: str, user: str) -> Turn:
+    label = MODEL_LABELS[name]
     print(f"\n▶ {name} [{label}] — {role} ...", flush=True)
     t0 = time.time()
-    text = callers[name](system, user)
+    text = session.callers[name](system, user)
     turn = Turn(name, role, text.strip(), time.time() - t0)
-    turns.append(turn)
+    session.turns.append(turn)
     print(f"  ✓ {len(text.split())} words in {turn.seconds:.0f}s")
     preview = re.sub(r"\s+", " ", text)[:300]
     print(f"  {preview}…")
     return turn
 
 
-def attack_prompt(question, context, turns):
-    prev = turns[-1]
+def attack_prompt(session: Session) -> str:
+    prev = session.turns[-1]
     return (
-        transcript_text(question, context, turns[:-1])
+        transcript_text(session, session.turns[:-1])
         + f"\n\n=====\n## OUTPUT TO ATTACK — {prev.model} ({prev.role})\n{prev.text}\n=====\n\n"
         "Attack the output above. You may draw on earlier turns, but your target is the most recent one."
     )
 
 
-ROUND_STEPS = (
-    ("Gemini", "Red team", ATTACKER),
-    ("OpenAI", "Red team", ATTACKER),
-    ("Claude", "Rebuttal", REBUTTAL),
-)
+def _round_steps(session: Session) -> list[tuple[str, str, str]]:
+    lead = session.providers[0]
+    attackers = [p for p in session.providers if p != lead]
+    steps = [(p, "Red team", ATTACKER) for p in attackers]
+    steps.append((lead, "Rebuttal", REBUTTAL))
+    return steps
 
 
-def run_council(question: str, context: str, rounds: int, callers) -> list[Turn]:
-    turns: list[Turn] = []
-    run_turn("Claude", "Opening", PROPOSER, transcript_text(question, context, []), turns, callers)
-    for _ in range(rounds):
-        _run_round(question, context, turns, callers)
-    _run_brief(question, context, turns, callers)
-    return turns
+def _default_round_steps() -> tuple[tuple[str, str, str], ...]:
+    attackers = [p for p in PROVIDER_ORDER if p != "Mistral"]
+    steps = [(p, "Red team", ATTACKER) for p in attackers]
+    steps.append(("Mistral", "Rebuttal", REBUTTAL))
+    return tuple(steps)
 
 
-def _run_round(question: str, context: str, turns: list[Turn], callers) -> None:
-    for name, role, system in ROUND_STEPS:
-        run_turn(name, role, system, attack_prompt(question, context, turns), turns, callers)
+ROUND_STEPS = _default_round_steps()
 
 
-def _run_brief(question: str, context: str, turns: list[Turn], callers) -> None:
-    prompt = transcript_text(question, context, turns) + "\n\nWrite the decision brief now."
-    run_turn("Claude", "Brief", SYNTHESIS, prompt, turns, callers)
+def run_council(session: Session) -> list[Turn]:
+    lead = session.providers[0]
+    run_turn(session, lead, "Opening", PROPOSER, transcript_text(session, []))
+    for _ in range(session.rounds):
+        _run_round(session)
+    _run_brief(session)
+    return session.turns
+
+
+def _run_round(session: Session) -> None:
+    for name, role, system in _round_steps(session):
+        run_turn(session, name, role, system, attack_prompt(session))
+
+
+def _run_brief(session: Session) -> None:
+    lead = session.providers[0]
+    prompt = transcript_text(session) + "\n\nWrite the decision brief now."
+    run_turn(session, lead, "Brief", SYNTHESIS, prompt)
 
 
 def write_report(question: str, turns: list[Turn], outdir: Path, rounds: int) -> Path:
@@ -319,10 +367,8 @@ def _report_lines(question: str, turns: list[Turn], rounds: int) -> list[str]:
 
 
 def _generation_note(rounds: int) -> str:
-    return (
-        f"*Generated {dt.datetime.now():%d %b %Y %H:%M} · {rounds} round(s) · "
-        f"Claude={CLAUDE_MODEL}, Gemini={GEMINI_MODEL}, OpenAI={OPENAI_MODEL}*\n"
-    )
+    labels = ", ".join(f"{name}={MODEL_LABELS[name]}" for name in PROVIDER_ORDER)
+    return f"*Generated {dt.datetime.now():%d %b %Y %H:%M} · {rounds} round(s) · {labels}*\n"
 
 
 def write_html_copy(path: Path, md_text: str, question: str) -> Path:
@@ -411,47 +457,97 @@ def list_models():
 
 
 def _model_sources():
-    return [("Anthropic", _anthropic_models), ("OpenAI", _openai_models), ("Gemini", _gemini_models)]
-
-
-def _anthropic_models() -> list[str]:
-    return [m.id for m in __import__("anthropic").Anthropic().models.list(limit=50)]
-
-
-def _openai_models() -> list[str]:
-    return sorted(m.id for m in __import__("openai").OpenAI().models.list() if m.id.startswith(("gpt", "o")))
-
-
-def _gemini_models() -> list[str]:
-    client = __import__("google.genai", fromlist=["Client"]).Client()
     return [
-        m.name.removeprefix("models/") for m in client.models.list() if "generateContent" in (m.supported_actions or [])
+        ("Mistral", _mistral_models),
+        ("OpenRouter", _openrouter_models),
+        ("Ollama-Cloud", _ollama_cloud_models),
+        ("OpenCode-Go", _opencode_go_models),
     ]
 
 
+def _fetch_models(base_url: str, key: str | None) -> list[str]:
+    if not key:
+        return ["(no API key set)"]
+    from openai import OpenAI
+
+    client = OpenAI(base_url=base_url, api_key=key)
+    return sorted(m.id for m in client.models.list().data)
+
+
+def _mistral_models() -> list[str]:
+    return _fetch_models("https://api.mistral.ai/v1", os.getenv("MISTRAL_API_KEY"))
+
+
+def _openrouter_models() -> list[str]:
+    return _fetch_models("https://openrouter.ai/api/v1", os.getenv("OPENROUTER_API_KEY"))
+
+
+def _ollama_cloud_models() -> list[str]:
+    key = os.getenv("OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY")
+    return _fetch_models("https://ollama.com/v1", key)
+
+
+def _opencode_go_models() -> list[str]:
+    key = os.getenv("OPENCODE_API_KEY") or os.getenv("OPENCODE_GO_API_KEY")
+    return _fetch_models("https://opencode.ai/zen/go/v1", key)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description="Claude → Gemini → OpenAI → Claude adversarial decision council")
+    desc = "Mistral → OpenRouter → Ollama Cloud → OpenCode Go adversarial decision council"
+    ap = argparse.ArgumentParser(description=desc)
+    _add_parser_args(ap)
+    return ap
+
+
+def _add_parser_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("question", nargs="?", help="The decision question (or use --file)")
     ap.add_argument("--file", "-f", help="Read the decision question/brief from a text/markdown file")
     ap.add_argument(
         "--context", "-c", action="append", default=[], help="Background file(s) to include (txt, md, csv). Repeatable."
     )
-    ap.add_argument(
-        "--rounds", "-r", type=int, default=1, help="Full Gemini→OpenAI→Claude loops before the brief (default 1)"
-    )
+    ap.add_argument("--rounds", "-r", type=int, default=1, help="Full attack loops before the brief (default 1)")
     ap.add_argument("--out", "-o", default="reports", help="Output folder (default ./reports)")
     ap.add_argument("--dry-run", action="store_true", help="Run the pipeline with fake responses (no API calls)")
     ap.add_argument("--list-models", action="store_true", help="List model IDs available to your API keys")
     ap.add_argument("--open", action="store_true", help="Open the finished brief in your browser")
-    return ap
+    ap.add_argument("--providers", default=None, help="Comma-separated providers (e.g. mistral,openrouter)")
+    ap.add_argument("--skip", action="append", default=[], help="Provider to skip (repeatable)")
+
+
+def _normalize_provider(name: str) -> str:
+    aliases = {
+        "mistral": "Mistral",
+        "openrouter": "OpenRouter",
+        "ollama-cloud": "Ollama-Cloud",
+        "ollamacloud": "Ollama-Cloud",
+        "opencode-go": "OpenCode-Go",
+        "opencodego": "OpenCode-Go",
+        "opencode": "OpenCode-Go",
+    }
+    canonical = aliases.get(name.lower().strip())
+    if not canonical:
+        sys.exit(f"Unknown provider '{name}'. Valid providers: {', '.join(PROVIDER_ORDER)}")
+    return canonical
+
+
+def _resolve_providers(a) -> tuple[str, ...]:
+    raw = [p.strip() for p in a.providers.split(",") if p.strip()] if a.providers else list(PROVIDER_ORDER)
+    selected = [_normalize_provider(p) for p in raw]
+    to_skip = {_normalize_provider(p) for p in a.skip}
+    result = tuple(p for p in selected if p not in to_skip)
+    if not result:
+        sys.exit("Error: No providers selected after filtering.")
+    return result
 
 
 def main():
     a = build_parser().parse_args()
     if a.list_models:
         return list_models()
+    providers = _resolve_providers(a)
     question = _resolve_question(a)
-    _run_and_report(a, question, _build_context(a), resolve_callers(a.dry_run))
+    callers = resolve_callers(a.dry_run, providers)
+    _run_and_report(a, question, _build_context(a), callers, providers)
 
 
 def _resolve_question(a) -> str:
@@ -471,10 +567,12 @@ def _build_context(a) -> str:
     return context
 
 
-def _run_and_report(a, question: str, context: str, callers) -> None:
-    print(f"Adversarial Council — {a.rounds} round(s), {1 + 3 * a.rounds + 1} model calls")
+def _run_and_report(a, question: str, context: str, callers, providers: tuple[str, ...] = PROVIDER_ORDER) -> None:
+    total_calls = 1 + len(providers) * a.rounds + 1
+    print(f"Adversarial Council — {a.rounds} round(s), {total_calls} model calls")
+    session = Session(question.strip(), context, callers, a.rounds, providers=providers)
     try:
-        turns = run_council(question.strip(), context, a.rounds, callers)
+        turns = run_council(session)
     except KeyboardInterrupt:
         sys.exit("\nStopped.")
     path = write_report(question.strip().splitlines()[0], turns, Path(a.out), a.rounds)
@@ -489,21 +587,23 @@ def _open_report(path: Path) -> None:
     webbrowser.open(path.resolve().as_uri())
 
 
-def resolve_callers(dry_run: bool):
+def _missing_keys(providers: tuple[str, ...]) -> list[str]:
+    key_map = {
+        "Mistral": ("MISTRAL_API_KEY", os.getenv("MISTRAL_API_KEY")),
+        "OpenRouter": ("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY")),
+        "Ollama-Cloud": ("OLLAMA_CLOUD_API_KEY", os.getenv("OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY")),
+        "OpenCode-Go": ("OPENCODE_API_KEY", os.getenv("OPENCODE_API_KEY") or os.getenv("OPENCODE_GO_API_KEY")),
+    }
+    return [key_map[p][0] for p in providers if not key_map[p][1]]
+
+
+def resolve_callers(dry_run: bool, providers: tuple[str, ...] = PROVIDER_ORDER):
     if dry_run:
-        return {k: call_fake(k) for k in CALLERS}
-    missing = [
-        k
-        for k, v in {
-            "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY"),
-            "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
-            "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
-        }.items()
-        if not v
-    ]
+        return {k: call_fake(k) for k in providers}
+    missing = _missing_keys(providers)
     if missing:
-        sys.exit(f"Missing API keys: {', '.join(missing)}. Copy .env.example to .env and fill them in.")
-    return CALLERS
+        sys.exit(f"Missing API keys: {', '.join(missing)}. Set them in ~/.zshenv or .env.")
+    return {k: CALLERS[k] for k in providers}
 
 
 if __name__ == "__main__":

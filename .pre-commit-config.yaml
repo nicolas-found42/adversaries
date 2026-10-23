@@ -22,9 +22,30 @@ repos:
         pass_filenames: false
         always_run: true
 
+      - id: pytest
+        name: pytest
+        entry: uv run pytest -q
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: codelimit-strict
         name: codelimit (max 15 lines per function)
         entry: uv run python scripts/check_function_length.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: lizard
+        name: lizard (CCN ≤10, params ≤5)
+        entry: uv run lizard . -C 10 -a 5 -w
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: import-linter
+        name: import-linter (tooling must not import the app)
+        entry: uv run lint-imports
         language: system
         pass_filenames: false
         always_run: true

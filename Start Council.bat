@@ -5,7 +5,7 @@ cd /d "%~dp0"
 title Adversarial Council
 
 echo ============================================================
-echo   ADVERSARIAL COUNCIL  -  Claude vs Gemini vs OpenAI
+echo   ADVERSARIAL COUNCIL  -  Mistral vs OpenRouter vs Ollama Cloud vs OpenCode Go
 echo ============================================================
 echo.
 
@@ -29,7 +29,7 @@ if not exist ".venv\Scripts\python.exe" (
   %PY% -m venv .venv
   if errorlevel 1 ( echo Setup failed. Please send a screenshot of this window for help. & pause & exit /b )
   ".venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
-  ".venv\Scripts\python.exe" -m pip install --quiet anthropic openai google-genai python-dotenv
+  ".venv\Scripts\python.exe" -m pip install --quiet openai python-dotenv
   if errorlevel 1 ( echo Install failed - check your internet connection and try again. & pause & exit /b )
   echo Components installed.
   echo.
@@ -38,16 +38,17 @@ set "VPY=.venv\Scripts\python.exe"
 
 rem ---- 3. One-time API keys -------------------------------------
 if not exist ".env" (
-  echo ONE-TIME SETUP: paste your three API keys.
+  echo ONE-TIME SETUP: paste your API keys.
   echo To paste: right-click inside this window, then press Enter.
   echo.
-  set /p "AKEY=Claude (Anthropic) key: "
-  set /p "OKEY=OpenAI key: "
-  set /p "GKEY=Google Gemini key: "
-  > .env echo ANTHROPIC_API_KEY=!AKEY!
-  >> .env echo OPENAI_API_KEY=!OKEY!
-  >> .env echo GEMINI_API_KEY=!GKEY!
-  echo.
+  set /p "MKEY=Mistral key: "
+  set /p "ORKEY=OpenRouter key: "
+  set /p "OLKEY=Ollama Cloud key: "
+  set /p "OCKEY=OpenCode Go key: "
+  > .env echo MISTRAL_API_KEY=!MKEY!
+  >> .env echo OPENROUTER_API_KEY=!ORKEY!
+  >> .env echo OLLAMA_CLOUD_API_KEY=!OLKEY!
+  >> .env echo OPENCODE_API_KEY=!OCKEY!
   echo Keys saved. To change them later, open the file ".env" in this folder with Notepad.
   echo.
 )

@@ -1,13 +1,14 @@
 # Adversarial Council
 
-Ask a decision question once. It runs a red-team chain across three AI vendors and gives you a one-page executive decision brief.
+Ask a decision question once. It runs a red-team chain across four AI providers and gives you a one-page executive decision brief.
 
 ```
-Claude (opening position)
-   → Gemini   attacks Claude's arguments
-   → OpenAI   attacks Gemini's critique
-   → Claude   concedes / rebuts, revises its recommendation
-   → Claude   writes the Decision Brief (with the full debate attached as an appendix)
+Mistral (opening position)
+   → OpenRouter   attacks Mistral's arguments
+   → Ollama Cloud attacks OpenRouter's critique
+   → OpenCode Go  attacks Ollama Cloud's critique
+   → Mistral      concedes / rebuts, revises its recommendation
+   → Mistral      writes the Decision Brief (with the full debate attached as an appendix)
 ```
 
 Each model gets the whole debate so far, but its job is to attack the **most recent** output. Every claim is numbered (C1, R1…) so later models can target specific points.
@@ -23,10 +24,11 @@ Each model gets the whole debate so far, but its job is to attack the **most rec
    uv sync --all-extras
    ```
    (`--all-extras` adds optional readers for PDF/DOCX/XLSX context files; skip it if you only need txt/md/csv.)
-3. Copy `.env.example` to `.env` and paste your three API keys:
-   - Anthropic: https://console.anthropic.com
-   - OpenAI: https://platform.openai.com/api-keys
-   - Gemini: https://aistudio.google.com/apikey
+3. Copy `.env.example` to `.env` and paste your API keys (or export them in `~/.zshenv`):
+   - Mistral: `MISTRAL_API_KEY`
+   - OpenRouter: `OPENROUTER_API_KEY`
+   - Ollama Cloud: `OLLAMA_CLOUD_API_KEY`
+   - OpenCode Go: `OPENCODE_API_KEY`
 4. Check which models your keys can use, and set the ones you want in `.env`:
    ```
    uv run council.py --list-models
@@ -34,21 +36,34 @@ Each model gets the whole debate so far, but its job is to attack the **most rec
 
 ## Development
 
-The project uses [uv](https://docs.astral.sh/uv/), [Ruff](https://docs.astral.sh/ruff/) (lint + format), and [ty](https://docs.astral.sh/ty/) (type check), configured in `pyproject.toml`. [CodeLimit](https://getcodelimit.github.io/) guards function length.
+Toolchain, all configured in `pyproject.toml` unless noted:
+
+| Tool | Role | Limit |
+|---|---|---|
+| [uv](https://docs.astral.sh/uv/) | env + deps | `uv sync --all-extras` |
+| [Ruff](https://docs.astral.sh/ruff/) | lint + format | config in `pyproject.toml` |
+| [ty](https://docs.astral.sh/ty/) | type check | the whole repo |
+| [pytest](https://docs.pytest.org/) | behaviour | `tests/` |
+| [CodeLimit](https://getcodelimit.github.io/) | function length | ≤15 code lines |
+| [lizard](https://github.com/terryyin/lizard) | CCN, params | ≤10, ≤5 |
+| [radon](https://radon.readthedocs.io/) + [xenon](https://xenon.readthedocs.io/) | complexity report | advisory |
+| [import-linter](https://import-linter.readthedocs.io/) | dependency contracts | tooling must not import the app |
 
 ```
-uv sync --all-extras        # install dependencies
-uv run ruff check --fix     # lint (auto-fix)
-uv run ruff format          # format
-uv run ty check             # type check
-uv run codelimit check .    # CodeLimit's own gate (warn >30, fail >60)
-uv run python scripts/check_function_length.py   # strict gate: fail if any function >15 lines
-uv run council.py --dry-run "test"   # smoke test, no API calls
+uv sync --all-extras                          # install dependencies
+uv run pre-commit install                     # run the gates before each commit
+uv run pre-commit run --all-files             # every gate, exactly as CI runs it
+uv run pre-commit run codelimit-strict --all-files   # one gate; ids are in the hook config
+uv run council.py --dry-run "test"            # smoke test, no API calls
 ```
 
-CI runs the same checks on every push/PR. Pre-commit hooks (`uv run pre-commit install`) run Ruff, ty, and the strict CodeLimit gate locally before each commit.
+The hook entries in `.pre-commit-config.yaml` are authoritative for flags and thresholds; the table above summarises the limits. CI runs the same hooks, so a green local run is a green build.
 
-Function-length policy: every function must stay in CodeLimit's "easy" band (≤15 lines of code). `scripts/check_function_length.py` enforces this in CI and pre-commit using CodeLimit's own measurement algorithm; raise the number as an argument to inspect a different threshold.
+**Length policy — one number: ≤15 lines of code per function.** CodeLimit owns it; `scripts/check_function_length.py` enforces it using CodeLimit's own measurement algorithm (pass an argument to inspect a different threshold). lizard deliberately does not gate length: its "length" counts physical span including signature and decorators, so a second number would contradict the first. It gates cyclomatic complexity (≤10) and parameter count (≤5).
+
+**Complexity is advisory.** radon is a reporter and always exits 0; xenon turns its ranks into an exit code, but that step is `continue-on-error` in CI. A function drifting from B to C is a signal to look, not a blocked merge.
+
+**Why the import-linter contract points backwards:** the app is a top-level module (`council.py`), and import-linter can only root a graph at a package, so the expressible contract is "tooling must not import the app" rather than the reverse. If `council.py` is ever split into a package, invert it.
 
 ## Use
 
@@ -84,8 +99,8 @@ Recommendation and confidence level, the options compared, the arguments that he
 
 - **Write the question as a decision**, with a deadline and limits: "Hire 3 engineers in Lagos or outsource to an agency, budget ₦X, decide by Dec 1".
 - **Give it your real data** with `--context`. If you don't, the models fall back on generic assumptions.
-- **Pay most attention to "Unresolved disagreements".** When three different models still disagree after the debate, that is usually where your own judgement or more research is needed.
-- **Cost:** one round is 5 model calls, usually a few cents to about $1 depending on the models and how much context you include.
+- **Pay most attention to "Unresolved disagreements".** When multiple different models still disagree after the debate, that is usually where your own judgement or more research is needed.
+- **Cost:** one round is 6 model calls, usually a few cents depending on the models and how much context you include.
 - **Change the order or roles:** edit `run_council()` in `council.py`. The prompts are plain text at the top of the file.
 
 *This is decision support, not a decision. Check facts and figures before acting.*

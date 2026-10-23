@@ -1,6 +1,6 @@
 # Adversarial Council
 
-A command-line tool that answers a decision question by running a structured adversarial debate across three AI vendors, then synthesising the result into an executive decision brief.
+A command-line tool that answers a decision question by running a structured adversarial debate across four AI providers (Mistral, OpenRouter, Ollama Cloud, OpenCode Go), then synthesising the result into an executive decision brief.
 
 ## Language
 
@@ -35,7 +35,7 @@ The Lead Analyst's response to the red-team chain, marking each attack CONCEDE /
 _Avoid_: defence, reply
 
 **Round**:
-One Gemini → OpenAI → Claude loop after the opening. `--rounds N` runs N of them before the brief.
+One OpenRouter → Ollama Cloud → OpenCode Go → Mistral rebuttal loop after the opening. `--rounds N` runs N of them before the brief.
 _Avoid_: iteration, pass, cycle
 
 **Chain**:
@@ -63,12 +63,11 @@ _Avoid_: brief (the brief is the content; the report is the file)
 ### Runtime
 
 **Caller**:
-A per-vendor adapter (`call_claude`, `call_gemini`, `call_openai`, or a fake) invoked by model label for one turn.
+A per-vendor adapter (`call_mistral`, `call_openrouter`, `call_ollama_cloud`, `call_opencode_go`, or a fake) invoked by model label for one turn.
 _Avoid_: client (the vendor SDK object), provider
 
 **Model label**:
-The vendor key a turn is filed under: `Claude`, `Gemini`, or `OpenAI`. It selects the model ID and the caller.
-_Avoid_: vendor, provider, backend
+The vendor key a turn is filed under: `Mistral`, `OpenRouter`, `Ollama-Cloud`, or `OpenCode-Go`. It selects the model ID and the caller.
 
 **Dry run**:
 A council run with fake callers that exercises the whole chain without API calls or spend.

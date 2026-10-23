@@ -1,12 +1,10 @@
 [project]
 name = "adversaries"
 version = "0.1.0"
-description = "Adversarial Council — executive decision support via a cross-model red-team chain (Claude → Gemini → OpenAI → Claude)."
+description = "Adversarial Council — executive decision support via a cross-model red-team chain (Mistral → OpenRouter → Ollama Cloud → OpenCode Go)."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "anthropic>=0.40",
-    "google-genai>=1.0",
     "openai>=1.50",
     "python-dotenv>=1.0",
 ]
@@ -24,9 +22,14 @@ docs = [
 [dependency-groups]
 dev = [
     "codelimit",
+    "import-linter>=2.15",
+    "lizard>=1.24.2",
     "pre-commit",
+    "pytest>=8",
+    "radon[toml]>=6.0.1",
     "ruff",
     "ty",
+    "xenon>=0.9.3",
 ]
 
 [tool.ruff]
@@ -62,3 +65,32 @@ pythonVersion = "3.14"
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.14"
+
+[tool.radon]
+exclude = "**/.venv/**,**/__pycache__/**,**/build/**,**/dist/**"
+show_complexity = true
+average = true
+total_average = true
+
+[tool.importlinter]
+# import-linter can only lint packages (directories), not a top-level module, so
+# the graph is rooted at `scripts/`. The application module is pulled in as an
+# external package purely so tooling is forbidden from importing it.
+root_packages = ["scripts"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Repository tooling must not import the application"
+type = "forbidden"
+source_modules = ["scripts.check_function_length"]
+forbidden_modules = ["council"]
+
+[tool.pytest.ini_options]
+# The app is a flat module (council.py), not a package; pytest's importlib mode
+# needs the repo root on sys.path to import it.
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest's assertion rewriting makes `assert` the correct idiom in tests.
+"tests/**" = ["S101"]
