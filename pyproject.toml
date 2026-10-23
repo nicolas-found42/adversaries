@@ -51,11 +51,14 @@ select = [
     "EXE", # flake8-executable
 ]
 
-[tool.ty.rules]
-# council.py reads optional document formats via lazy imports (pypdf, docx,
-# openpyxl, markdown) that are not installed by default; unresolved-import
-# would fail on those. unresolved-attribute covers two stub-union false
-# positives (sys.stdout.reconfigure, Anthropic content-block union).
-unresolved-import = "ignore"
-possibly-missing-submodule = "ignore"
-unresolved-attribute = "ignore"
+[tool.pyright]
+# Without this, pyright falls back to the system interpreter and cannot resolve
+# the project's dependencies. ty reads .venv automatically; pyright needs it said.
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.14"
+
+[tool.basedpyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.14"

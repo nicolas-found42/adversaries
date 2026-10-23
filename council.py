@@ -18,8 +18,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import datetime as dt
+import html
+import importlib
 import os
 import re
 import sys
@@ -28,8 +29,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 for _s in (sys.stdout, sys.stderr):  # Windows consoles default to a legacy codepage
-    with contextlib.suppress(Exception):
-        _s.reconfigure(encoding="utf-8", errors="replace")
+    _reconfigure = getattr(_s, "reconfigure", None)
+    if _reconfigure is not None:
+        _reconfigure(encoding="utf-8", errors="replace")
 
 try:
     from dotenv import load_dotenv
@@ -147,7 +149,7 @@ class Turn:
     seconds: float
 
 
-def _retry(fn, attempts=4):
+def _retry(fn, attempts=4) -> str:
     for i in range(attempts):
         try:
             return fn()
@@ -157,10 +159,12 @@ def _retry(fn, attempts=4):
             wait = 2 ** (i + 1)
             print(f"   ! {type(e).__name__}: {str(e)[:160]} — retrying in {wait}s", file=sys.stderr)
             time.sleep(wait)
+    raise RuntimeError(f"_retry gave up after {attempts} attempt(s)")
 
 
 def call_claude(system: str, user: str) -> str:
     import anthropic
+    from anthropic.types import TextBlock
 
     client = anthropic.Anthropic()  # ANTHROPIC_API_KEY
 
@@ -171,7 +175,7 @@ def call_claude(system: str, user: str) -> str:
             system=system,
             messages=[{"role": "user", "content": user}],
         )
-        return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        return "".join(block.text for block in msg.content if isinstance(block, TextBlock))
 
     return _retry(go)
 
@@ -323,21 +327,17 @@ def _generation_note(rounds: int) -> str:
 
 def write_html_copy(path: Path, md_text: str, question: str) -> Path:
     try:
-        import markdown  # noqa: F401  (availability probe)
+        document = _html_document(md_text, question)
     except ImportError:
         return path
     html_path = path.with_suffix(".html")
-    html_path.write_text(_html_document(md_text, question), encoding="utf-8")
+    html_path.write_text(document, encoding="utf-8")
     return html_path
 
 
 def _html_document(md_text: str, question: str) -> str:
-    import html as _html
-
-    import markdown
-
-    body = markdown.markdown(md_text, extensions=["tables", "sane_lists"])
-    title = _html.escape(question[:80])
+    body = importlib.import_module("markdown").markdown(md_text, extensions=["tables", "sane_lists"])
+    title = html.escape(question[:80])
     return f"<!doctype html><meta charset='utf-8'><title>{title}</title><style>{_HTML_CSS}</style>{body}"
 
 
@@ -373,17 +373,14 @@ def _read_text_for(p: Path) -> str:
 
 
 def _read_pdf(p: Path) -> str:
-    from pypdf import PdfReader
-
-    return "\n".join(page.extract_text() or "" for page in PdfReader(str(p)).pages)
+    reader = importlib.import_module("pypdf").PdfReader
+    return "\n".join(page.extract_text() or "" for page in reader(str(p)).pages)
 
 
 def _read_docx(p: Path) -> str:
-    import docx
-
-    d = docx.Document(str(p))
-    text = "\n".join(par.text for par in d.paragraphs)
-    return text + _docx_tables(d)
+    document = importlib.import_module("docx").Document(str(p))
+    text = "\n".join(par.text for par in document.paragraphs)
+    return text + _docx_tables(document)
 
 
 def _docx_tables(d) -> str:
@@ -391,10 +388,9 @@ def _docx_tables(d) -> str:
 
 
 def _read_xlsx(p: Path) -> str:
-    import openpyxl
-
-    wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
-    return "".join(_sheet_text(ws) for ws in wb.worksheets)
+    openpyxl = importlib.import_module("openpyxl")
+    workbook = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
+    return "".join(_sheet_text(ws) for ws in workbook.worksheets)
 
 
 def _sheet_text(ws) -> str:
