@@ -8,6 +8,11 @@ env/
 venv/
 ENV/
 .venv/
+.ruff_cache/
+.uv-cache/
+.pytest_cache/
+.mypy_cache/
+.ty_cache/
 
 # Environment / secrets
 .env
@@ -24,3 +29,4 @@ ENV/
 build/
 dist/
 *.egg-info/
+reports/

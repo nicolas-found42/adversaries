@@ -29,7 +29,7 @@ if not exist ".venv\Scripts\python.exe" (
   %PY% -m venv .venv
   if errorlevel 1 ( echo Setup failed. Please send a screenshot of this window for help. & pause & exit /b )
   ".venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
-  ".venv\Scripts\python.exe" -m pip install --quiet -r requirements.txt
+  ".venv\Scripts\python.exe" -m pip install --quiet anthropic openai google-genai python-dotenv
   if errorlevel 1 ( echo Install failed - check your internet connection and try again. & pause & exit /b )
   echo Components installed.
   echo.

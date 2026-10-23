@@ -1,0 +1,5 @@
+# CodeLimit configuration — excludes files that are not source code.
+# Default thresholds: warn at 31-60 lines per function, fail at 60+.
+exclude:
+  - RECORD
+  - "Start Council.bat"

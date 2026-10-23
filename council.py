@@ -14,9 +14,11 @@ Usage:
     python council.py --dry-run "Test question"        # no API calls, checks the pipeline
     python council.py --list-models                     # show model IDs your keys can use
 """
+
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import os
 import re
@@ -26,13 +28,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 for _s in (sys.stdout, sys.stderr):  # Windows consoles default to a legacy codepage
-    try:
+    with contextlib.suppress(Exception):
         _s.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
-        pass
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv(Path(__file__).with_name(".env"))
 except ImportError:
     pass
@@ -55,7 +56,9 @@ The goal is a better DECISION, not winning. Rules:
 - If you don't know something, say what information would resolve it.
 - Keep it under ~900 words."""
 
-PROPOSER = SHARED_RULES + """
+PROPOSER = (
+    SHARED_RULES
+    + """
 
 ROLE: Lead Analyst (opening position).
 Produce:
@@ -65,8 +68,11 @@ Produce:
 4. Key assumptions and the evidence for each.
 5. Top risks and mitigations.
 6. What would change your mind."""
+)
 
-ATTACKER = SHARED_RULES + """
+ATTACKER = (
+    SHARED_RULES
+    + """
 
 ROLE: Adversarial Red Team. You are reviewing the output of the PREVIOUS model in the chain.
 Your job is to break its argument. Do NOT summarise it politely.
@@ -80,8 +86,11 @@ Produce:
    but say so explicitly and explain why the argument survives).
 5. Concessions — the points from the previous output that you could NOT break.
 Number your own claims (R1, R2...)."""
+)
 
-REBUTTAL = SHARED_RULES + """
+REBUTTAL = (
+    SHARED_RULES
+    + """
 
 ROLE: Lead Analyst (rebuttal). You opened this debate; the red-team chain has now attacked it.
 Respond to the MOST RECENT critique, but use the full debate.
@@ -91,6 +100,7 @@ Produce:
 2. Counter-attacks on weaknesses in the critique itself.
 3. Your REVISED recommendation and what changed from your opening position.
 4. Remaining genuine uncertainties."""
+)
 
 SYNTHESIS = """You are the Chief of Staff writing for a busy executive. You have the full transcript of an
 adversarial debate between three AI models about a decision. Write a decision brief in Markdown:
@@ -128,10 +138,11 @@ say so. Do not introduce new arguments that weren't in the debate except to flag
 
 # ---------------------------------------------------------------- clients --
 
+
 @dataclass
 class Turn:
-    model: str      # "Claude" | "Gemini" | "OpenAI"
-    role: str       # "Opening" | "Red team" | "Rebuttal" | "Brief"
+    model: str  # "Claude" | "Gemini" | "OpenAI"
+    role: str  # "Opening" | "Red team" | "Rebuttal" | "Brief"
     text: str
     seconds: float
 
@@ -140,7 +151,7 @@ def _retry(fn, attempts=4):
     for i in range(attempts):
         try:
             return fn()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if i == attempts - 1:
                 raise
             wait = 2 ** (i + 1)
@@ -150,34 +161,47 @@ def _retry(fn, attempts=4):
 
 def call_claude(system: str, user: str) -> str:
     import anthropic
+
     client = anthropic.Anthropic()  # ANTHROPIC_API_KEY
+
     def go():
         msg = client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system,
+            model=CLAUDE_MODEL,
+            max_tokens=MAX_TOKENS,
+            system=system,
             messages=[{"role": "user", "content": user}],
         )
         return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+
     return _retry(go)
 
 
 def call_gemini(system: str, user: str) -> str:
     from google import genai
     from google.genai import types
+
     client = genai.Client()  # GEMINI_API_KEY or GOOGLE_API_KEY
+
     def go():
         r = client.models.generate_content(
-            model=GEMINI_MODEL, contents=user,
+            model=GEMINI_MODEL,
+            contents=user,
             config=types.GenerateContentConfig(system_instruction=system, max_output_tokens=MAX_TOKENS * 2),
         )
         if not r.text:
-            raise RuntimeError(f"Gemini returned no text (finish reason: {r.candidates[0].finish_reason if r.candidates else 'none'})")
+            raise RuntimeError(
+                f"Gemini returned no text (finish reason: {r.candidates[0].finish_reason if r.candidates else 'none'})"
+            )
         return r.text
+
     return _retry(go)
 
 
 def call_openai(system: str, user: str) -> str:
     from openai import OpenAI
+
     client = OpenAI()  # OPENAI_API_KEY
+
     def go():
         r = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -188,6 +212,7 @@ def call_openai(system: str, user: str) -> str:
         if not text:
             raise RuntimeError("OpenAI returned no text (try raising COUNCIL_MAX_TOKENS)")
         return text
+
     return _retry(go)
 
 
@@ -195,6 +220,7 @@ def call_fake(name):
     def f(system: str, user: str) -> str:
         role = system.split("ROLE:")[1].split("\n")[0].strip() if "ROLE:" in system else "Brief"
         return f"[{name} — dry run — {role}] C1: placeholder claim. ({len(user)} chars of context received)"
+
     return f
 
 
@@ -202,6 +228,7 @@ CALLERS = {"Claude": call_claude, "Gemini": call_gemini, "OpenAI": call_openai}
 
 
 # --------------------------------------------------------------- pipeline --
+
 
 def transcript_text(question: str, context: str, turns: list[Turn]) -> str:
     parts = [f"## DECISION QUESTION\n{question}"]
@@ -227,20 +254,28 @@ def run_turn(name: str, role: str, system: str, user: str, turns: list[Turn], ca
 
 def attack_prompt(question, context, turns):
     prev = turns[-1]
-    return (transcript_text(question, context, turns[:-1])
-            + f"\n\n=====\n## OUTPUT TO ATTACK — {prev.model} ({prev.role})\n{prev.text}\n=====\n\n"
-            "Attack the output above. You may draw on earlier turns, but your target is the most recent one.")
+    return (
+        transcript_text(question, context, turns[:-1])
+        + f"\n\n=====\n## OUTPUT TO ATTACK — {prev.model} ({prev.role})\n{prev.text}\n=====\n\n"
+        "Attack the output above. You may draw on earlier turns, but your target is the most recent one."
+    )
 
 
 def run_council(question: str, context: str, rounds: int, callers) -> list[Turn]:
     turns: list[Turn] = []
     run_turn("Claude", "Opening", PROPOSER, transcript_text(question, context, []), turns, callers)
-    for r in range(rounds):
+    for _r in range(rounds):
         run_turn("Gemini", "Red team", ATTACKER, attack_prompt(question, context, turns), turns, callers)
         run_turn("OpenAI", "Red team", ATTACKER, attack_prompt(question, context, turns), turns, callers)
         run_turn("Claude", "Rebuttal", REBUTTAL, attack_prompt(question, context, turns), turns, callers)
-    run_turn("Claude", "Brief", SYNTHESIS,
-             transcript_text(question, context, turns) + "\n\nWrite the decision brief now.", turns, callers)
+    run_turn(
+        "Claude",
+        "Brief",
+        SYNTHESIS,
+        transcript_text(question, context, turns) + "\n\nWrite the decision brief now.",
+        turns,
+        callers,
+    )
     return turns
 
 
@@ -250,26 +285,42 @@ def write_report(question: str, turns: list[Turn], outdir: Path, rounds: int) ->
     slug = re.sub(r"[^a-z0-9]+", "-", question.lower())[:50].strip("-") or "decision"
     path = outdir / f"{stamp}_{slug}.md"
     brief = turns[-1].text
-    lines = [brief, "\n---\n", "# Appendix: Full adversarial debate\n",
-             f"*Generated {dt.datetime.now():%d %b %Y %H:%M} · {rounds} round(s) · "
-             f"Claude={CLAUDE_MODEL}, Gemini={GEMINI_MODEL}, OpenAI={OPENAI_MODEL}*\n",
-             f"**Question:** {question}\n"]
+    lines = [
+        brief,
+        "\n---\n",
+        "# Appendix: Full adversarial debate\n",
+        (
+            f"*Generated {dt.datetime.now():%d %b %Y %H:%M} · {rounds} round(s) · "
+            f"Claude={CLAUDE_MODEL}, Gemini={GEMINI_MODEL}, OpenAI={OPENAI_MODEL}*\n"
+        ),
+        f"**Question:** {question}\n",
+    ]
     for i, t in enumerate(turns[:-1], 1):
         lines.append(f"\n## Turn {i} — {t.model}: {t.role}\n\n{t.text}\n")
     lines.append("\n---\n*AI-generated decision support. Verify facts and figures before acting.*\n")
     md_text = "\n".join(lines)
     path.write_text(md_text, encoding="utf-8")
+    return write_html_copy(path, md_text, question)
+
+
+def write_html_copy(path: Path, md_text: str, question: str) -> Path:
     try:  # readable HTML copy that opens in any browser
         import html as _html
+
         import markdown
+
         body = markdown.markdown(md_text, extensions=["tables", "sane_lists"])
-        css = ("body{font:16px/1.6 Segoe UI,system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#1f2328}"
-               "h1{border-bottom:2px solid #d0d7de;padding-bottom:8px}h2{margin-top:32px}"
-               "table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #d0d7de;padding:6px 10px;text-align:left;vertical-align:top}"
-               "th{background:#f6f8fa}hr{margin:40px 0}")
+        css = (
+            "body{font:16px/1.6 Segoe UI,system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#1f2328}"
+            "h1{border-bottom:2px solid #d0d7de;padding-bottom:8px}h2{margin-top:32px}"
+            "table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #d0d7de;padding:6px 10px;text-align:left;vertical-align:top}"
+            "th{background:#f6f8fa}hr{margin:40px 0}"
+        )
         title = _html.escape(question[:80])
         html_path = path.with_suffix(".html")
-        html_path.write_text(f"<!doctype html><meta charset='utf-8'><title>{title}</title><style>{css}</style>{body}", encoding="utf-8")
+        html_path.write_text(
+            f"<!doctype html><meta charset='utf-8'><title>{title}</title><style>{css}</style>{body}", encoding="utf-8"
+        )
         return html_path
     except ImportError:
         return path
@@ -281,15 +332,18 @@ def read_document(p: Path, limit: int = 60_000) -> str:
     try:
         if ext == ".pdf":
             from pypdf import PdfReader
+
             text = "\n".join(page.extract_text() or "" for page in PdfReader(str(p)).pages)
         elif ext == ".docx":
             import docx
+
             d = docx.Document(str(p))
             text = "\n".join(par.text for par in d.paragraphs)
             for t in d.tables:
                 text += "\n" + "\n".join(" | ".join(c.text for c in row.cells) for row in t.rows)
         elif ext in (".xlsx", ".xlsm"):
             import openpyxl
+
             wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
             text = ""
             for ws in wb.worksheets:
@@ -299,7 +353,7 @@ def read_document(p: Path, limit: int = 60_000) -> str:
                         text += " | ".join("" if v is None else str(v) for v in row) + "\n"
         else:
             text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"  ! Could not read {p.name}: {e}", file=sys.stderr)
         return "(file could not be read)"
     if len(text) > limit:
@@ -308,27 +362,46 @@ def read_document(p: Path, limit: int = 60_000) -> str:
 
 
 def list_models():
-    for name, fn in [("Anthropic", lambda: [m.id for m in __import__("anthropic").Anthropic().models.list(limit=50)]),
-                     ("OpenAI", lambda: sorted(m.id for m in __import__("openai").OpenAI().models.list() if m.id.startswith(("gpt", "o")))),
-                     ("Gemini", lambda: [m.name.removeprefix("models/") for m in __import__("google.genai", fromlist=["Client"]).Client().models.list()
-                                         if "generateContent" in (m.supported_actions or [])])]:
+    for name, fn in [
+        ("Anthropic", lambda: [m.id for m in __import__("anthropic").Anthropic().models.list(limit=50)]),
+        (
+            "OpenAI",
+            lambda: sorted(m.id for m in __import__("openai").OpenAI().models.list() if m.id.startswith(("gpt", "o"))),
+        ),
+        (
+            "Gemini",
+            lambda: [
+                m.name.removeprefix("models/")
+                for m in __import__("google.genai", fromlist=["Client"]).Client().models.list()
+                if "generateContent" in (m.supported_actions or [])
+            ],
+        ),
+    ]:
         try:
             print(f"\n{name}:\n  " + "\n  ".join(fn()))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"\n{name}: could not list ({e})")
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Claude → Gemini → OpenAI → Claude adversarial decision council")
     ap.add_argument("question", nargs="?", help="The decision question (or use --file)")
     ap.add_argument("--file", "-f", help="Read the decision question/brief from a text/markdown file")
-    ap.add_argument("--context", "-c", action="append", default=[], help="Background file(s) to include (txt, md, csv). Repeatable.")
-    ap.add_argument("--rounds", "-r", type=int, default=1, help="Full Gemini→OpenAI→Claude loops before the brief (default 1)")
+    ap.add_argument(
+        "--context", "-c", action="append", default=[], help="Background file(s) to include (txt, md, csv). Repeatable."
+    )
+    ap.add_argument(
+        "--rounds", "-r", type=int, default=1, help="Full Gemini→OpenAI→Claude loops before the brief (default 1)"
+    )
     ap.add_argument("--out", "-o", default="reports", help="Output folder (default ./reports)")
     ap.add_argument("--dry-run", action="store_true", help="Run the pipeline with fake responses (no API calls)")
     ap.add_argument("--list-models", action="store_true", help="List model IDs available to your API keys")
     ap.add_argument("--open", action="store_true", help="Open the finished brief in your browser")
-    a = ap.parse_args()
+    return ap
+
+
+def main():
+    a = build_parser().parse_args()
 
     if a.list_models:
         return list_models()
@@ -337,21 +410,13 @@ def main():
     if not question:
         question = input("Decision question: ").strip()
     if not question:
-        ap.error("No question given.")
+        build_parser().error("No question given.")
 
     context = "\n\n".join(f"### {Path(p).name}\n{read_document(Path(p))}" for p in a.context)
     if a.context:
         print(f"Included {len(a.context)} background file(s): {', '.join(Path(p).name for p in a.context)}")
 
-    if a.dry_run:
-        callers = {k: call_fake(k) for k in CALLERS}
-    else:
-        missing = [k for k, v in {"ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY"),
-                                  "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
-                                  "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")}.items() if not v]
-        if missing:
-            sys.exit(f"Missing API keys: {', '.join(missing)}. Copy .env.example to .env and fill them in.")
-        callers = CALLERS
+    callers = resolve_callers(a.dry_run)
 
     print(f"Adversarial Council — {a.rounds} round(s), {1 + 3 * a.rounds + 1} model calls")
     try:
@@ -362,7 +427,25 @@ def main():
     print(f"\n✅ Decision brief saved to: {path.resolve()}")
     if a.open:
         import webbrowser
+
         webbrowser.open(path.resolve().as_uri())
+
+
+def resolve_callers(dry_run: bool):
+    if dry_run:
+        return {k: call_fake(k) for k in CALLERS}
+    missing = [
+        k
+        for k, v in {
+            "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY"),
+            "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
+            "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
+        }.items()
+        if not v
+    ]
+    if missing:
+        sys.exit(f"Missing API keys: {', '.join(missing)}. Copy .env.example to .env and fill them in.")
+    return CALLERS
 
 
 if __name__ == "__main__":

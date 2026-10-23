@@ -1,0 +1,61 @@
+[project]
+name = "adversaries"
+version = "0.1.0"
+description = "Adversarial Council — executive decision support via a cross-model red-team chain (Claude → Gemini → OpenAI → Claude)."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "anthropic>=0.40",
+    "google-genai>=1.0",
+    "openai>=1.50",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# Optional document readers used by `council.py --context` for pdf/docx/xlsx,
+# plus markdown for the HTML report copy.
+docs = [
+    "markdown>=3.0",
+    "openpyxl>=3.0",
+    "pypdf>=4.0",
+    "python-docx>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "codelimit",
+    "pre-commit",
+    "ruff",
+    "ty",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E4",  # pycodestyle errors (subset: real errors only)
+    "E7",
+    "E9",
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "N",   # pep8-naming
+    "ISC", # flake8-implicit-str-concat
+    "RUF", # ruff-specific rules
+    "S",   # flake8-bandit (security)
+    "EXE", # flake8-executable
+]
+
+[tool.ty.rules]
+# council.py reads optional document formats via lazy imports (pypdf, docx,
+# openpyxl, markdown) that are not installed by default; unresolved-import
+# would fail on those. unresolved-attribute covers two stub-union false
+# positives (sys.stdout.reconfigure, Anthropic content-block union).
+unresolved-import = "ignore"
+possibly-missing-submodule = "ignore"
+unresolved-attribute = "ignore"

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint · Type check · Code limit
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.14", "3.15"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: ty type check
+        run: uv run ty check
+
+      - name: CodeLimit (fail on warnings)
+        run: |
+          uv run codelimit scan .
+          if uv run codelimit check . 2>&1 | grep -q "needs refactoring"; then
+            echo "::error::Functions over 30 lines of code found — refactor before merging."
+            exit 1
+          fi
+
+      - name: Smoke test (dry run)
+        run: uv run council.py --dry-run "CI smoke test question"
