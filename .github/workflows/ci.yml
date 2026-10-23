@@ -39,13 +39,10 @@ jobs:
       - name: ty type check
         run: uv run ty check
 
-      - name: CodeLimit (fail on warnings)
+      - name: CodeLimit strict (max 15 lines per function)
         run: |
           uv run codelimit scan .
-          if uv run codelimit check . 2>&1 | grep -q "needs refactoring"; then
-            echo "::error::Functions over 30 lines of code found — refactor before merging."
-            exit 1
-          fi
+          uv run python scripts/check_function_length.py
 
       - name: Smoke test (dry run)
         run: uv run council.py --dry-run "CI smoke test question"

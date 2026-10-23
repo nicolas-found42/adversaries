@@ -261,98 +261,98 @@ def attack_prompt(question, context, turns):
     )
 
 
+ROUND_STEPS = (
+    ("Gemini", "Red team", ATTACKER),
+    ("OpenAI", "Red team", ATTACKER),
+    ("Claude", "Rebuttal", REBUTTAL),
+)
+
+
 def run_council(question: str, context: str, rounds: int, callers) -> list[Turn]:
     turns: list[Turn] = []
     run_turn("Claude", "Opening", PROPOSER, transcript_text(question, context, []), turns, callers)
-    for _r in range(rounds):
-        run_turn("Gemini", "Red team", ATTACKER, attack_prompt(question, context, turns), turns, callers)
-        run_turn("OpenAI", "Red team", ATTACKER, attack_prompt(question, context, turns), turns, callers)
-        run_turn("Claude", "Rebuttal", REBUTTAL, attack_prompt(question, context, turns), turns, callers)
-    run_turn(
-        "Claude",
-        "Brief",
-        SYNTHESIS,
-        transcript_text(question, context, turns) + "\n\nWrite the decision brief now.",
-        turns,
-        callers,
-    )
+    for _ in range(rounds):
+        _run_round(question, context, turns, callers)
+    _run_brief(question, context, turns, callers)
     return turns
 
 
+def _run_round(question: str, context: str, turns: list[Turn], callers) -> None:
+    for name, role, system in ROUND_STEPS:
+        run_turn(name, role, system, attack_prompt(question, context, turns), turns, callers)
+
+
+def _run_brief(question: str, context: str, turns: list[Turn], callers) -> None:
+    prompt = transcript_text(question, context, turns) + "\n\nWrite the decision brief now."
+    run_turn("Claude", "Brief", SYNTHESIS, prompt, turns, callers)
+
+
 def write_report(question: str, turns: list[Turn], outdir: Path, rounds: int) -> Path:
-    outdir.mkdir(parents=True, exist_ok=True)
-    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
-    slug = re.sub(r"[^a-z0-9]+", "-", question.lower())[:50].strip("-") or "decision"
-    path = outdir / f"{stamp}_{slug}.md"
-    brief = turns[-1].text
-    lines = [
-        brief,
-        "\n---\n",
-        "# Appendix: Full adversarial debate\n",
-        (
-            f"*Generated {dt.datetime.now():%d %b %Y %H:%M} · {rounds} round(s) · "
-            f"Claude={CLAUDE_MODEL}, Gemini={GEMINI_MODEL}, OpenAI={OPENAI_MODEL}*\n"
-        ),
-        f"**Question:** {question}\n",
-    ]
-    for i, t in enumerate(turns[:-1], 1):
-        lines.append(f"\n## Turn {i} — {t.model}: {t.role}\n\n{t.text}\n")
-    lines.append("\n---\n*AI-generated decision support. Verify facts and figures before acting.*\n")
-    md_text = "\n".join(lines)
+    path = _report_path(question, outdir)
+    md_text = "\n".join(_report_lines(question, turns, rounds))
     path.write_text(md_text, encoding="utf-8")
     return write_html_copy(path, md_text, question)
 
 
+def _report_path(question: str, outdir: Path) -> Path:
+    outdir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+    slug = re.sub(r"[^a-z0-9]+", "-", question.lower())[:50].strip("-") or "decision"
+    return outdir / f"{stamp}_{slug}.md"
+
+
+def _report_lines(question: str, turns: list[Turn], rounds: int) -> list[str]:
+    header = [
+        turns[-1].text,
+        "\n---\n",
+        "# Appendix: Full adversarial debate\n",
+        _generation_note(rounds),
+        f"**Question:** {question}\n",
+    ]
+    body = [f"\n## Turn {i} — {t.model}: {t.role}\n\n{t.text}\n" for i, t in enumerate(turns[:-1], 1)]
+    footer = "\n---\n*AI-generated decision support. Verify facts and figures before acting.*\n"
+    return [*header, *body, footer]
+
+
+def _generation_note(rounds: int) -> str:
+    return (
+        f"*Generated {dt.datetime.now():%d %b %Y %H:%M} · {rounds} round(s) · "
+        f"Claude={CLAUDE_MODEL}, Gemini={GEMINI_MODEL}, OpenAI={OPENAI_MODEL}*\n"
+    )
+
+
 def write_html_copy(path: Path, md_text: str, question: str) -> Path:
-    try:  # readable HTML copy that opens in any browser
-        import html as _html
-
-        import markdown
-
-        body = markdown.markdown(md_text, extensions=["tables", "sane_lists"])
-        css = (
-            "body{font:16px/1.6 Segoe UI,system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#1f2328}"
-            "h1{border-bottom:2px solid #d0d7de;padding-bottom:8px}h2{margin-top:32px}"
-            "table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #d0d7de;padding:6px 10px;text-align:left;vertical-align:top}"
-            "th{background:#f6f8fa}hr{margin:40px 0}"
-        )
-        title = _html.escape(question[:80])
-        html_path = path.with_suffix(".html")
-        html_path.write_text(
-            f"<!doctype html><meta charset='utf-8'><title>{title}</title><style>{css}</style>{body}", encoding="utf-8"
-        )
-        return html_path
+    try:
+        import markdown  # noqa: F401  (availability probe)
     except ImportError:
         return path
+    html_path = path.with_suffix(".html")
+    html_path.write_text(_html_document(md_text, question), encoding="utf-8")
+    return html_path
+
+
+def _html_document(md_text: str, question: str) -> str:
+    import html as _html
+
+    import markdown
+
+    body = markdown.markdown(md_text, extensions=["tables", "sane_lists"])
+    title = _html.escape(question[:80])
+    return f"<!doctype html><meta charset='utf-8'><title>{title}</title><style>{_HTML_CSS}</style>{body}"
+
+
+_HTML_CSS = (
+    "body{font:16px/1.6 Segoe UI,system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#1f2328}"
+    "h1{border-bottom:2px solid #d0d7de;padding-bottom:8px}h2{margin-top:32px}"
+    "table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #d0d7de;padding:6px 10px;text-align:left;vertical-align:top}"
+    "th{background:#f6f8fa}hr{margin:40px 0}"
+)
 
 
 def read_document(p: Path, limit: int = 60_000) -> str:
     """Turn txt/md/csv/pdf/docx/xlsx into plain text for the models."""
-    ext = p.suffix.lower()
     try:
-        if ext == ".pdf":
-            from pypdf import PdfReader
-
-            text = "\n".join(page.extract_text() or "" for page in PdfReader(str(p)).pages)
-        elif ext == ".docx":
-            import docx
-
-            d = docx.Document(str(p))
-            text = "\n".join(par.text for par in d.paragraphs)
-            for t in d.tables:
-                text += "\n" + "\n".join(" | ".join(c.text for c in row.cells) for row in t.rows)
-        elif ext in (".xlsx", ".xlsm"):
-            import openpyxl
-
-            wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
-            text = ""
-            for ws in wb.worksheets:
-                text += f"\n[Sheet: {ws.title}]\n"
-                for row in ws.iter_rows(values_only=True):
-                    if any(v is not None for v in row):
-                        text += " | ".join("" if v is None else str(v) for v in row) + "\n"
-        else:
-            text = p.read_text(encoding="utf-8", errors="replace")
+        text = _read_text_for(p)
     except Exception as e:
         print(f"  ! Could not read {p.name}: {e}", file=sys.stderr)
         return "(file could not be read)"
@@ -361,26 +361,76 @@ def read_document(p: Path, limit: int = 60_000) -> str:
     return text
 
 
+def _read_text_for(p: Path) -> str:
+    ext = p.suffix.lower()
+    if ext == ".pdf":
+        return _read_pdf(p)
+    if ext == ".docx":
+        return _read_docx(p)
+    if ext in (".xlsx", ".xlsm"):
+        return _read_xlsx(p)
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
+def _read_pdf(p: Path) -> str:
+    from pypdf import PdfReader
+
+    return "\n".join(page.extract_text() or "" for page in PdfReader(str(p)).pages)
+
+
+def _read_docx(p: Path) -> str:
+    import docx
+
+    d = docx.Document(str(p))
+    text = "\n".join(par.text for par in d.paragraphs)
+    return text + _docx_tables(d)
+
+
+def _docx_tables(d) -> str:
+    return "".join("\n" + "\n".join(" | ".join(c.text for c in row.cells) for row in t.rows) for t in d.tables)
+
+
+def _read_xlsx(p: Path) -> str:
+    import openpyxl
+
+    wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
+    return "".join(_sheet_text(ws) for ws in wb.worksheets)
+
+
+def _sheet_text(ws) -> str:
+    rows = [
+        " | ".join("" if v is None else str(v) for v in row)
+        for row in ws.iter_rows(values_only=True)
+        if any(v is not None for v in row)
+    ]
+    return f"\n[Sheet: {ws.title}]\n" + "".join(f"{row}\n" for row in rows)
+
+
 def list_models():
-    for name, fn in [
-        ("Anthropic", lambda: [m.id for m in __import__("anthropic").Anthropic().models.list(limit=50)]),
-        (
-            "OpenAI",
-            lambda: sorted(m.id for m in __import__("openai").OpenAI().models.list() if m.id.startswith(("gpt", "o"))),
-        ),
-        (
-            "Gemini",
-            lambda: [
-                m.name.removeprefix("models/")
-                for m in __import__("google.genai", fromlist=["Client"]).Client().models.list()
-                if "generateContent" in (m.supported_actions or [])
-            ],
-        ),
-    ]:
+    for name, fn in _model_sources():
         try:
             print(f"\n{name}:\n  " + "\n  ".join(fn()))
         except Exception as e:
             print(f"\n{name}: could not list ({e})")
+
+
+def _model_sources():
+    return [("Anthropic", _anthropic_models), ("OpenAI", _openai_models), ("Gemini", _gemini_models)]
+
+
+def _anthropic_models() -> list[str]:
+    return [m.id for m in __import__("anthropic").Anthropic().models.list(limit=50)]
+
+
+def _openai_models() -> list[str]:
+    return sorted(m.id for m in __import__("openai").OpenAI().models.list() if m.id.startswith(("gpt", "o")))
+
+
+def _gemini_models() -> list[str]:
+    client = __import__("google.genai", fromlist=["Client"]).Client()
+    return [
+        m.name.removeprefix("models/") for m in client.models.list() if "generateContent" in (m.supported_actions or [])
+    ]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -402,22 +452,30 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main():
     a = build_parser().parse_args()
-
     if a.list_models:
         return list_models()
+    question = _resolve_question(a)
+    _run_and_report(a, question, _build_context(a), resolve_callers(a.dry_run))
 
+
+def _resolve_question(a) -> str:
     question = Path(a.file).read_text(encoding="utf-8") if a.file else a.question
-    if not question:
-        question = input("Decision question: ").strip()
+    if question:
+        return question
+    question = input("Decision question: ").strip()
     if not question:
         build_parser().error("No question given.")
+    return question
 
+
+def _build_context(a) -> str:
     context = "\n\n".join(f"### {Path(p).name}\n{read_document(Path(p))}" for p in a.context)
     if a.context:
         print(f"Included {len(a.context)} background file(s): {', '.join(Path(p).name for p in a.context)}")
+    return context
 
-    callers = resolve_callers(a.dry_run)
 
+def _run_and_report(a, question: str, context: str, callers) -> None:
     print(f"Adversarial Council — {a.rounds} round(s), {1 + 3 * a.rounds + 1} model calls")
     try:
         turns = run_council(question.strip(), context, a.rounds, callers)
@@ -426,9 +484,13 @@ def main():
     path = write_report(question.strip().splitlines()[0], turns, Path(a.out), a.rounds)
     print(f"\n✅ Decision brief saved to: {path.resolve()}")
     if a.open:
-        import webbrowser
+        _open_report(path)
 
-        webbrowser.open(path.resolve().as_uri())
+
+def _open_report(path: Path) -> None:
+    import webbrowser
+
+    webbrowser.open(path.resolve().as_uri())
 
 
 def resolve_callers(dry_run: bool):

@@ -41,11 +41,14 @@ uv sync --all-extras        # install dependencies
 uv run ruff check --fix     # lint (auto-fix)
 uv run ruff format          # format
 uv run ty check             # type check
-uv run codelimit check .    # function-length guard
+uv run codelimit check .    # CodeLimit's own gate (warn >30, fail >60)
+uv run python scripts/check_function_length.py   # strict gate: fail if any function >15 lines
 uv run council.py --dry-run "test"   # smoke test, no API calls
 ```
 
-CI runs the same checks on every push/PR. Pre-commit hooks (`uv run pre-commit install`) run Ruff and CodeLimit locally before each commit.
+CI runs the same checks on every push/PR. Pre-commit hooks (`uv run pre-commit install`) run Ruff, ty, and the strict CodeLimit gate locally before each commit.
+
+Function-length policy: every function must stay in CodeLimit's "easy" band (≤15 lines of code). `scripts/check_function_length.py` enforces this in CI and pre-commit using CodeLimit's own measurement algorithm; raise the number as an argument to inspect a different threshold.
 
 ## Use
 

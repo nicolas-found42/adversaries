@@ -22,9 +22,9 @@ repos:
         pass_filenames: false
         always_run: true
 
-      - id: codelimit
-        name: codelimit (function length)
-        entry: uv run codelimit check
+      - id: codelimit-strict
+        name: codelimit (max 15 lines per function)
+        entry: uv run python scripts/check_function_length.py
         language: system
-        types: [python]
-        pass_filenames: true
+        pass_filenames: false
+        always_run: true
