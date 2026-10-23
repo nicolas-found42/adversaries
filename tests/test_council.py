@@ -109,3 +109,67 @@ def test_skip_provider_runs_remaining_council_turns():
 def test_resolve_providers_filters_skipped():
     args = council.build_parser().parse_args(["--skip", "ollama-cloud", "test"])
     assert council._resolve_providers(args) == ("Mistral", "OpenRouter", "OpenCode-Go")
+
+
+def test_rejects_nonpositive_rounds():
+    for bad in ("0", "-1"):
+        args = council.build_parser().parse_args(["--dry-run", "--rounds", bad, "Hire or outsource?"])
+        try:
+            council._validate_rounds(args)
+        except SystemExit as e:
+            assert e.code != 0
+        else:
+            raise AssertionError(f"--rounds {bad} was accepted")
+
+
+def test_blank_file_question_exits_cleanly(tmp_path: Path, capsys):
+    blank = tmp_path / "blank.md"
+    blank.write_text("   \n  \n", encoding="utf-8")
+    args = council.build_parser().parse_args(["--dry-run", "--file", str(blank)])
+    try:
+        council._resolve_question(args)
+    except SystemExit as e:
+        assert e.code != 0
+    else:
+        raise AssertionError("blank --file question was accepted")
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_missing_file_question_exits_cleanly(tmp_path: Path, capsys):
+    missing = tmp_path / "nope.md"
+    args = council.build_parser().parse_args(["--dry-run", "--file", str(missing)])
+    try:
+        council._resolve_question(args)
+    except SystemExit as e:
+        assert e.code != 0
+    else:
+        raise AssertionError("missing --file question was accepted")
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_prompt_eof_exits_cleanly(monkeypatch, capsys):
+    def boom(_prompt: str) -> str:
+        raise EOFError
+
+    args = council.build_parser().parse_args(["--dry-run"])
+    monkeypatch.setattr("builtins.input", boom)
+    try:
+        council._resolve_question(args)
+    except SystemExit as e:
+        assert e.code != 0
+    else:
+        raise AssertionError("EOF on stdin was accepted")
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_build_context_routes_notice_to_stderr_in_stream_mode(tmp_path: Path, capsys):
+    ctx = tmp_path / "ctx.md"
+    ctx.write_text("budget 5m\n", encoding="utf-8")
+    args = council.build_parser().parse_args(
+        ["--dry-run", "--out", str(tmp_path), "--context", str(ctx), "Test question?"]
+    )
+    args.json_stream = True
+    council._build_context(args)
+    out = capsys.readouterr()
+    assert "Included 1 background file(s)" in out.err
+    assert out.out == ""
