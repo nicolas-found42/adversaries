@@ -406,10 +406,21 @@ fn test_app_lifecycle_without_framework() {
     let mut app = App::new(false, None, true);
     assert_eq!(app.active_tab, Tab::Debate);
     assert!(!app.is_running);
-    assert!(
-        !app.sessions.is_empty(),
-        "App::new must pick up the real reports/ sessions"
+    // Fresh checkouts have no reports; startup must reflect the configured directory.
+    let reports_dir = std::env::var_os("COUNCIL_REPORTS_DIR").map_or_else(
+        || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("reports"),
+        std::path::PathBuf::from,
     );
+    let expected_paths: Vec<_> = scan_sessions(&reports_dir)
+        .into_iter()
+        .map(|session| session.path_str)
+        .collect();
+    let actual_paths: Vec<_> = app
+        .sessions
+        .iter()
+        .map(|session| session.path_str.clone())
+        .collect();
+    assert_eq!(actual_paths, expected_paths);
 
     app.submit_composer();
     assert!(
