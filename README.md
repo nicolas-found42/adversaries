@@ -34,6 +34,56 @@ Each model gets the whole debate so far, but its job is to attack the **most rec
    uv run council.py --list-models
    ```
 
+## Interactive UI (`council-ui`)
+
+One Rust GUI built with [egui](https://www.egui.rs/) / [eframe](https://docs.rs/eframe) (`0.37`). It runs natively as a desktop app **and** in the browser as WebAssembly — the same views, the same engine seam (`uv run council.py --json-stream`).
+
+### Quick start
+
+```bash
+# Instant offline demo (zero API keys needed)
+cargo run -- --demo
+
+# Dry run with Python backend (no API cost)
+cargo run -- --dry-run "Should we expand our engineering hub to Nairobi or London?"
+
+# Live debate with the four AI providers
+cargo run -- "Hire 3 engineers in Lagos or outsource to an agency?"
+```
+
+### Live browser editing (`trunk serve`)
+
+Edit the Rust views in `src/ui/` and watch the browser refresh automatically:
+
+```bash
+rustup target add wasm32-unknown-unknown   # one time
+cargo install --locked trunk               # one time (or: brew install trunk)
+
+cargo run --bin council-bridge             # :8787, spawns council.py, streams SSE
+trunk serve                                # :8080, rebuilds on save, reloads the tab
+```
+
+The wasm build cannot spawn processes, so the browser UI talks to the `council-bridge` sidecar (`POST /api/run` with an SSE stream, `GET /api/sessions`, `GET /api/session?path=…`, `POST /api/cancel`); trunk proxies `/api/*` so no CORS is needed in dev. Session files and context attachments are served by the bridge. The native app spawns `council.py` directly and needs no server.
+
+### Decision workspace
+
+The desktop and browser use the same Rust views. The browser is a live-reload preview for fast UI iteration.
+
+- **Reading first:** session sidebar, persistent decision question, a Markdown reader with tables and inline formatting, and a collapsible debate panel.
+- **Your council:** every role has its own provider and searchable model dropdown: opening analyst, three critiques, rebuttal, and decision brief. Reuse a provider or model in any combination. Catalogs come from your configured provider accounts; an editable model ID supports models omitted from a catalog. A listed model still needs to support the provider's chat-completions API.
+- **Composer:** multiline questions, context attachments, one to five rounds, and an offline dry-run option. The call count is shown before launch. UI runs use one request attempt per stage, with automatic SDK retries disabled.
+- **Live progress:** elapsed stage time and completed-stage count. Follow live is optional; reading an earlier stage pauses following. A completed brief is announced without changing your view.
+- **Recovery:** errors stop the spinner and preserve completed arguments. Retry continues at the failed stage with the original role assignments. Restart runs the entire council again.
+- **History:** stage checkpoints and chosen models are saved locally, including interrupted debates. Open a saved decision from the sidebar. New runs retain the entire multiline question.
+- **Claim provenance:** prompts distinguish source material, assumptions, and judgement. A supplied claim needs an exact excerpt from your question or context; unmatched claims are downgraded to assumptions. An excerpt match verifies the quotation exists in the input, not the truth of the conclusion. Unchallenged claims are explicitly labelled **UNCHALLENGED**.
+
+Use `n` for a new decision, `1`–`5` for views, `j`/`k` or arrow keys to navigate, `c` to stop, and `r` to rerun. All primary actions also have buttons. Native `q` quits.
+
+The bridge accepts the same per-role configuration as native runs. `RunConfig.roles` maps `opening`, `critique_1`, `critique_2`, `critique_3`, `rebuttal`, and `brief` to `{ "provider": "Mistral", "model": "mistral-small-latest" }`. CLI users can supply this map with `--roles-json`; existing `--providers` / `--skip` behavior is retained. `--models-json` exposes catalog metadata without credentials.
+
+Browser context attachments are stored in the ignored `.council-context/` directory (10 MB per file). Native attachments reference the selected local files. API keys remain in the Python backend environment.
+
+
 ## Development
 
 Toolchain, all configured in `pyproject.toml` unless noted:
@@ -48,6 +98,7 @@ Toolchain, all configured in `pyproject.toml` unless noted:
 | [lizard](https://github.com/terryyin/lizard) | CCN, params | ≤10, ≤5 |
 | [radon](https://radon.readthedocs.io/) + [xenon](https://xenon.readthedocs.io/) | complexity report | advisory |
 | [import-linter](https://import-linter.readthedocs.io/) | dependency contracts | tooling must not import the app |
+| [Rust / Cargo](https://doc.rust-lang.org/cargo/) | unified egui UI + bridge | `cargo fmt`, `cargo clippy`, `cargo test` |
 
 ```
 uv sync --all-extras                          # install dependencies
@@ -104,3 +155,19 @@ Recommendation and confidence level, the options compared, the arguments that he
 - **Change the order or roles:** edit `run_council()` in `council.py`. The prompts are plain text at the top of the file.
 
 *This is decision support, not a decision. Check facts and figures before acting.*
+
+### Output policy and diagnostics
+
+Council automatically uses the selected model's advertised output/context limits.
+There is no 4,000-token application cap or token slider. Supported thinking models
+use their lowest positive advertised reasoning level; unknown reasoning policies stop
+before inference. Unknown output maxima retain provider defaults, labeled in diagnostics.
+Truncated or reasoning-only responses are saved as incomplete and excluded from later
+arguments. There are no automatic retries, continuations or summarizer calls.
+
+Open **Diagnostics** (shortcut **6**) to inspect or copy request policy, token usage,
+finish reasons, request IDs and local event history. Private request snapshots and
+transport lifecycle records support later investigation. Cost and provider-side
+cancellation remain subject to what each provider reports.
+See [the audit, retention and investigation guide](docs/agents/diagnostics.md) and
+[the comparative research](docs/research/2026-10-23-token-budgets-and-reasoning.md).

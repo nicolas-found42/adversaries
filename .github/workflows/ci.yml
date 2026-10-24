@@ -26,6 +26,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --all-extras
 
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       # Runs the same hooks as local pre-commit, so the flags live in exactly one
       # place: .pre-commit-config.yaml. A hook that rewrites a file fails the run.
       - name: Quality gates

@@ -111,6 +111,27 @@ def test_resolve_providers_filters_skipped():
     assert council._resolve_providers(args) == ("Mistral", "OpenRouter", "OpenCode-Go")
 
 
+def test_dry_run_writes_json_sidecar(tmp_path: Path):
+    args = council.build_parser().parse_args(["--dry-run", "--out", str(tmp_path), "Hire or outsource?"])
+    council._run_and_report(args, "Hire or outsource?", "", council.resolve_callers(args.dry_run))
+    sidecars = list(tmp_path.glob("*.json"))
+    assert len(sidecars) == 1
+    data = council.json.loads(sidecars[0].read_text(encoding="utf-8"))
+    assert data["question"] == "Hire or outsource?"
+    assert len(data["turns"]) == 5
+
+
+def test_json_stream_emits_ndjson_events(tmp_path: Path, capsys):
+    args = council.build_parser().parse_args(["--dry-run", "--json-stream", "--out", str(tmp_path), "Test question?"])
+    council._run_and_report(args, "Test question?", "", council.resolve_callers(args.dry_run))
+    lines = capsys.readouterr().out.strip().splitlines()
+    events = [council.json.loads(line) for line in lines]
+    types = [e["type"] for e in events]
+    assert types[0] == "start"
+    assert types[-1] == "done"
+    assert "turn_start" in types and "turn_complete" in types
+
+
 def test_rejects_nonpositive_rounds():
     for bad in ("0", "-1"):
         args = council.build_parser().parse_args(["--dry-run", "--rounds", bad, "Hire or outsource?"])
@@ -162,14 +183,14 @@ def test_prompt_eof_exits_cleanly(monkeypatch, capsys):
     assert "Traceback" not in capsys.readouterr().err
 
 
-def test_build_context_routes_notice_to_stderr_in_stream_mode(tmp_path: Path, capsys):
+def test_json_stream_keeps_stdout_pure_ndjson(tmp_path: Path, capsys):
     ctx = tmp_path / "ctx.md"
     ctx.write_text("budget 5m\n", encoding="utf-8")
     args = council.build_parser().parse_args(
-        ["--dry-run", "--out", str(tmp_path), "--context", str(ctx), "Test question?"]
+        ["--dry-run", "--json-stream", "--out", str(tmp_path), "--context", str(ctx), "Test question?"]
     )
-    args.json_stream = True
-    council._build_context(args)
+    council._run_and_report(args, "Test question?", council._build_context(args), council.resolve_callers(args.dry_run))
     out = capsys.readouterr()
+    for line in out.out.strip().splitlines():
+        council.json.loads(line)
     assert "Included 1 background file(s)" in out.err
-    assert out.out == ""

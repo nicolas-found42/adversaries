@@ -38,7 +38,7 @@ repos:
 
       - id: lizard
         name: lizard (CCN ≤10, params ≤5)
-        entry: uv run lizard . -C 10 -a 5 -w
+        entry: uv run lizard . -C 10 -a 5 -w -x "*/node_modules/*" -x "*/dist/*" -x "*/target/*"
         language: system
         pass_filenames: false
         always_run: true
@@ -49,3 +49,23 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test
+        language: system
+        pass_filenames: false

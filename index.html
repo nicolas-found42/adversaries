@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  html,
+  body {
+    margin: 0;
+    height: 100%;
+    background-color: #0c1016;
+  }
+  canvas {
+    margin: auto;
+    max-width: 100%;
+    width: 100vw;
+    height: 100vh;
+  }
+  .center {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #9ca3af;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+</style>
+<body>
+  <canvas id="the_canvas_id"></canvas>
+  <div class="center" id="loading_text">
+    <h3>Loading Adversarial Council…</h3>
+  </div>
+  <link data-trunk rel="rust" data-bin="council-ui" data-wasm-opt="2" data-loading-text="Loading Adversarial Council…" />
+</body>
+</html>

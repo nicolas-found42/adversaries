@@ -21,12 +21,17 @@ import argparse
 import datetime as dt
 import html
 import importlib
+import json
 import os
 import re
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from council_diagnostics import Journal, environment_facts, fingerprint, private_write, session_diagnostics
+from council_inference import Completion, IncompleteCompletionError, complete, error_facts, recording
+from council_models import clear_capability_cache
 
 for _s in (sys.stdout, sys.stderr):  # Windows consoles default to a legacy codepage
     _reconfigure = getattr(_s, "reconfigure", None)
@@ -69,14 +74,19 @@ MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
 OLLAMA_CLOUD_MODEL = os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4.1-flash")
 OPENCODE_GO_MODEL = os.getenv("OPENCODE_GO_MODEL", os.getenv("OPENCODE_MODEL", "deepseek-v4.1-flash"))
-MAX_TOKENS = int(os.getenv("COUNCIL_MAX_TOKENS", "4000"))
 
 # ---------------------------------------------------------------- prompts --
 
 SHARED_RULES = """You are part of an executive decision-support council made up of different AI models.
 The goal is a better DECISION, not winning. Rules:
 - Number every claim you make (e.g. C1, C2...) so later reviewers can target them.
-- Separate facts, assumptions, and judgement. Flag any assumption the decision hinges on.
+- Label every claim [SUPPLIED], [ASSUMPTION], or [JUDGEMENT].
+- [SUPPLIED] means explicitly present in the executive question or background.
+- On each [SUPPLIED] claim line include | source: "exact excerpt from the question or background".
+- If no exact excerpt supports a claim, use [ASSUMPTION] or [JUDGEMENT] instead.
+- Never invent supplied metrics, dates, research citations, or confirmed roadmap details.
+- Hypothetical numbers must be explicitly marked [ASSUMPTION]. Unknowns stay unknown.
+- Distinguish an unchallenged claim from one supported by evidence. Debate is not verification.
 - Give rough probabilities or confidence (low/med/high) for key claims.
 - Be concrete: numbers, timeframes, owners, triggers. No filler, no flattery.
 - If you don't know something, say what information would resolve it.
@@ -171,66 +181,53 @@ class Turn:
     role: str  # "Opening" | "Red team" | "Rebuttal" | "Brief"
     text: str
     seconds: float
+    diagnostics: dict = field(default_factory=dict)
+    status: str = "complete"
 
 
-def _retry(fn, attempts=4) -> str:
-    for i in range(attempts):
-        try:
-            return fn()
-        except Exception as e:
-            if i == attempts - 1:
-                raise
-            wait = 2 ** (i + 1)
-            print(f"   ! {type(e).__name__}: {str(e)[:160]} — retrying in {wait}s", file=sys.stderr)
-            time.sleep(wait)
-    raise RuntimeError(f"_retry gave up after {attempts} attempt(s)")
+def _chat_completion(client, model: str, system: str, user: str, provider: str = "unknown") -> Completion:
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    return complete(client, model, messages, provider)
 
 
-def _chat_completion(client, model: str, system: str, user: str) -> str:
-    def go():
-        r = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=MAX_TOKENS,
-        )
-        msg = r.choices[0].message
-        text = msg.content or getattr(msg, "reasoning_content", "") or ""
-        if not text:
-            raise RuntimeError(f"{model} returned no text")
-        return text
-
-    return _retry(go)
-
-
-def call_mistral(system: str, user: str) -> str:
+def call_mistral(system: str, user: str) -> Completion:
     from openai import OpenAI
 
-    client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=os.environ.get("MISTRAL_API_KEY", ""))
-    return _chat_completion(client, MODEL_LABELS["Mistral"], system, user)
+    client = OpenAI(
+        base_url="https://api.mistral.ai/v1", api_key=os.environ.get("MISTRAL_API_KEY", ""), max_retries=0, timeout=90
+    )
+    return _chat_completion(client, MODEL_LABELS["Mistral"], system, user, "Mistral")
 
 
-def call_openrouter(system: str, user: str) -> str:
+def call_openrouter(system: str, user: str) -> Completion:
     from openai import OpenAI
 
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY", ""))
-    return _chat_completion(client, MODEL_LABELS["OpenRouter"], system, user)
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+        max_retries=0,
+        timeout=90,
+    )
+    return _chat_completion(client, MODEL_LABELS["OpenRouter"], system, user, "OpenRouter")
 
 
-def call_ollama_cloud(system: str, user: str) -> str:
+def call_ollama_cloud(system: str, user: str) -> Completion:
     from openai import OpenAI
 
     key = os.getenv("OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY", "")
-    client = OpenAI(base_url="https://ollama.com/v1", api_key=key)
-    return _chat_completion(client, MODEL_LABELS["Ollama-Cloud"], system, user)
+    client = OpenAI(base_url="https://ollama.com/v1", api_key=key, max_retries=0, timeout=90)
+    return _chat_completion(client, MODEL_LABELS["Ollama-Cloud"], system, user, "Ollama-Cloud")
 
 
-def call_opencode_go(system: str, user: str) -> str:
+def call_opencode_go(system: str, user: str) -> Completion:
     from openai import OpenAI
 
     key = os.getenv("OPENCODE_API_KEY") or os.getenv("OPENCODE_GO_API_KEY", "")
     headers = {"x-opencode-session": "adversarial-council"}
-    client = OpenAI(base_url="https://opencode.ai/zen/go/v1", api_key=key, default_headers=headers)
-    return _chat_completion(client, MODEL_LABELS["OpenCode-Go"], system, user)
+    client = OpenAI(
+        base_url="https://opencode.ai/zen/go/v1", api_key=key, default_headers=headers, max_retries=0, timeout=90
+    )
+    return _chat_completion(client, MODEL_LABELS["OpenCode-Go"], system, user, "OpenCode-Go")
 
 
 def call_fake(name):
@@ -256,6 +253,142 @@ MODEL_LABELS = {
 PROVIDER_ORDER = ("Mistral", "OpenRouter", "Ollama-Cloud", "OpenCode-Go")
 
 
+# --------------------------------------------------------- role routing --
+
+ROLE_NAMES = ("opening", "critique_1", "critique_2", "critique_3", "rebuttal", "brief")
+PROVIDER_ENDPOINTS = {
+    "Mistral": ("https://api.mistral.ai/v1", ("MISTRAL_API_KEY",)),
+    "OpenRouter": ("https://openrouter.ai/api/v1", ("OPENROUTER_API_KEY",)),
+    "Ollama-Cloud": ("https://ollama.com/v1", ("OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY")),
+    "OpenCode-Go": ("https://opencode.ai/zen/go/v1", ("OPENCODE_API_KEY", "OPENCODE_GO_API_KEY")),
+}
+
+
+def _provider_key(name: str) -> str:
+    return next((os.getenv(k, "") for k in PROVIDER_ENDPOINTS[name][1] if os.getenv(k)), "")
+
+
+def _safe_error(error: BaseException) -> str:
+    message = f"{type(error).__name__}: {error}"
+    for name in PROVIDER_ORDER:
+        key = _provider_key(name)
+        if key:
+            message = message.replace(key, "<redacted>")
+    return message[:1200]
+
+
+def model_catalog() -> list[dict]:
+    return [_catalog_entry(name) for name in PROVIDER_ORDER]
+
+
+def _catalog_entry(name: str) -> dict:
+    result = _catalog_status(name)
+    if not result["ready"]:
+        result["error"] = "API key not configured"
+        return result
+    try:
+        result["models"] = sorted(
+            {MODEL_LABELS[name], *_fetch_models(PROVIDER_ENDPOINTS[name][0], _provider_key(name))}
+        )
+    except Exception as error:
+        result["error"] = _safe_error(error)
+    return result
+
+
+def _catalog_status(name: str) -> dict:
+    return {
+        "provider": name,
+        "default_model": MODEL_LABELS[name],
+        "models": [MODEL_LABELS[name]],
+        "ready": bool(_provider_key(name)),
+        "error": "",
+    }
+
+
+def _parse_assignments(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    data = json.loads(raw)
+    if set(data) != set(ROLE_NAMES):
+        raise ValueError("Assignments must cover opening, critique_1/2/3, rebuttal, and brief")
+    return {role: _validate_assignment(value) for role, value in data.items()}
+
+
+def _validate_assignment(value: dict) -> dict:
+    provider, model = value.get("provider"), value.get("model", "").strip()
+    if provider not in PROVIDER_ENDPOINTS or not model or len(model) > 256:
+        raise ValueError("Each role requires a known provider and a non-empty model ID")
+    return {"provider": provider, "model": model}
+
+
+def _assigned_caller(selection: dict, dry_run: bool):
+    name, model = selection["provider"], selection["model"]
+    if dry_run:
+        return call_fake(f"{name} / {model}")
+    from openai import OpenAI
+
+    headers = {"x-opencode-session": "adversarial-council"} if name == "OpenCode-Go" else {}
+    client = OpenAI(
+        base_url=PROVIDER_ENDPOINTS[name][0],
+        api_key=_provider_key(name),
+        default_headers=headers,
+        max_retries=0,
+        timeout=90,
+    )
+    return lambda system, user: _chat_completion(client, model, system, user, name)
+
+
+def _assigned_steps(rounds: int) -> list[tuple[str, str, str]]:
+    attacks = [(f"critique_{n}", f"Red team {n}", ATTACKER) for n in range(1, 4)]
+    loop = [*attacks, ("rebuttal", "Rebuttal", REBUTTAL)]
+    return [("opening", "Opening", PROPOSER), *(loop * rounds), ("brief", "Brief", SYNTHESIS)]
+
+
+def _run_assigned_council(session: Session) -> list[Turn]:
+    steps = _assigned_steps(session.rounds)
+    _validate_resume(session, steps)
+    dry_run = session.dry_run
+    for key, _, _ in steps:
+        selection = session.assignments[key]
+        label = f"{selection['provider']} / {selection['model']}"
+        session.callers[label] = _assigned_caller(selection, dry_run)
+    for key, role, system in steps[len(session.turns) :]:
+        selection = session.assignments[key]
+        label = f"{selection['provider']} / {selection['model']}"
+        run_turn(session, label, role, system, _assigned_prompt(session, role))
+    return session.turns
+
+
+def _validate_resume(session: Session, steps: list[tuple[str, str, str]]) -> None:
+    if len(session.turns) > len(steps):
+        raise ValueError("Saved turns exceed the configured debate length")
+    for turn, (key, role, _) in zip(session.turns, steps, strict=False):
+        assignment = session.assignments[key]
+        expected = f"{assignment['provider']} / {assignment['model']}"
+        if turn.model != expected or turn.role != role:
+            raise ValueError("Saved turns do not match this council. Restart with the new assignments.")
+
+
+def _assigned_prompt(session: Session, role: str) -> str:
+    if role == "Opening":
+        return transcript_text(session, [])
+    if role == "Brief":
+        return transcript_text(session) + "\n\nWrite the decision brief now."
+    return attack_prompt(session)
+
+
+def _restore_turn(item: dict) -> Turn:
+    if item.get("status", "complete") != "complete":
+        raise ValueError("Only completed arguments can be resumed")
+    return Turn(item["model"], item["role"], item["text"], item["seconds"], item.get("diagnostics", {}))
+
+
+def _resume_turns(raw: str | None) -> list[Turn]:
+    if not raw:
+        return []
+    return [_restore_turn(item) for item in json.loads(raw)]
+
+
 # --------------------------------------------------------------- pipeline --
 
 
@@ -267,6 +400,13 @@ class Session:
     rounds: int = 1
     turns: list[Turn] = field(default_factory=list)
     providers: tuple[str, ...] = PROVIDER_ORDER
+    json_stream: bool = False
+    assignments: dict = field(default_factory=dict)
+    dry_run: bool = False
+    checkpoint: Path | None = None
+    run_config: dict = field(default_factory=dict)
+    journal: Journal | None = None
+    failed_turn: Turn | None = None
 
 
 def transcript_text(session: Session, turns: list[Turn] | None = None) -> str:
@@ -280,16 +420,96 @@ def transcript_text(session: Session, turns: list[Turn] | None = None) -> str:
 
 
 def run_turn(session: Session, name: str, role: str, system: str, user: str) -> Turn:
-    label = MODEL_LABELS[name]
-    print(f"\n▶ {name} [{label}] — {role} ...", flush=True)
-    t0 = time.time()
-    text = session.callers[name](system, user)
-    turn = Turn(name, role, text.strip(), time.time() - t0)
+    _notify_turn_start(session, name, role)
+    _journal_event(session, "stage_started", model=name, role=role, index=len(session.turns) + 1)
+    started = time.monotonic()
+    try:
+        with recording(session.journal):
+            result = session.callers[name](system, user)
+    except BaseException as error:
+        _failed_stage(session, Turn(name, role, "", time.monotonic() - started), error)
+        raise
+    return _completed_stage(session, Turn(name, role, "", time.monotonic() - started), result)
+
+
+def _completed_stage(session: Session, turn: Turn, result) -> Turn:
+    result = result if isinstance(result, Completion) else Completion(result)
+    turn.text = _ground_supplied_claims(result.text, session).strip()
+    turn.diagnostics = result.diagnostics
     session.turns.append(turn)
-    print(f"  ✓ {len(text.split())} words in {turn.seconds:.0f}s")
-    preview = re.sub(r"\s+", " ", text)[:300]
-    print(f"  {preview}…")
+    _journal_event(session, "stage_completed", model=turn.model, role=turn.role, diagnostics=turn.diagnostics)
+    _notify_turn_complete(session, turn)
     return turn
+
+
+def _journal_event(session: Session, event: str, **fields) -> None:
+    if session.journal:
+        session.journal.record(event, **fields)
+
+
+def _failed_stage(session: Session, turn: Turn, error: BaseException) -> None:
+    turn.status = "incomplete" if isinstance(error, IncompleteCompletionError) else "failed"
+    turn.diagnostics = {**error_facts(error), **getattr(error, "diagnostics", {})}
+    if isinstance(error, IncompleteCompletionError):
+        turn.text = error.result.text
+    session.failed_turn = turn
+    _journal_event(session, "stage_failed", model=turn.model, role=turn.role, diagnostics=turn.diagnostics)
+    _checkpoint_session(session)
+    _publish_diagnostics(session)
+    if session.json_stream:
+        _emit_json_event({"type": "turn_failed", **_turn_to_dict(len(session.turns) + 1, turn)})
+
+
+def _ground_supplied_claims(text: str, session: Session) -> str:
+    supplied = " ".join(f"{session.question}\n{session.context}".split()).casefold()
+    return "\n".join(_ground_claim_line(line, supplied) for line in text.splitlines())
+
+
+def _ground_claim_line(line: str, supplied: str) -> str:
+    line = line.replace("[SOURCE EXCERPT MATCHED]", "[SUPPLIED]")
+    if "[SUPPLIED]" not in line:
+        return line
+    excerpt = re.search(r'source:\s*"([^"\n]+)"', line, re.IGNORECASE)
+    matched = excerpt and " ".join(excerpt[1].split()).casefold() in supplied
+    label = "[SOURCE EXCERPT MATCHED]" if matched else "[ASSUMPTION: SOURCE UNCONFIRMED]"
+    return line.replace("[SUPPLIED]", label)
+
+
+def _notify_turn_start(session: Session, name: str, role: str) -> None:
+    if session.json_stream:
+        evt = {"type": "turn_start", "index": len(session.turns) + 1, "model": name, "role": role}
+        _emit_json_event(evt)
+        return
+    label = MODEL_LABELS.get(name, name)
+    print(f"\n▶ {name} [{label}] — {role} ...", flush=True)
+
+
+def _notify_turn_complete(session: Session, turn: Turn) -> None:
+    _checkpoint_session(session)
+    _publish_diagnostics(session)
+    if session.json_stream:
+        _emit_json_event(_turn_complete_event(session, turn))
+        return
+    print(f"  ✓ {len(turn.text.split())} words in {turn.seconds:.0f}s")
+    preview = re.sub(r"\s+", " ", turn.text)[:300]
+    print(f"  {preview}…")
+
+
+def _turn_complete_event(session: Session, turn: Turn) -> dict:
+    evt_type = "brief_complete" if turn.role == "Brief" else "turn_complete"
+    return {
+        "type": evt_type,
+        "index": len(session.turns),
+        "model": turn.model,
+        "role": turn.role,
+        "text": turn.text,
+        "seconds": round(turn.seconds, 2),
+        "diagnostics": turn.diagnostics,
+    }
+
+
+def _emit_json_event(data: dict) -> None:
+    print(json.dumps(data), flush=True)
 
 
 def attack_prompt(session: Session) -> str:
@@ -320,6 +540,8 @@ ROUND_STEPS = _default_round_steps()
 
 
 def run_council(session: Session) -> list[Turn]:
+    if session.assignments:
+        return _run_assigned_council(session)
     lead = session.providers[0]
     run_turn(session, lead, "Opening", PROPOSER, transcript_text(session, []))
     for _ in range(session.rounds):
@@ -339,16 +561,47 @@ def _run_brief(session: Session) -> None:
     run_turn(session, lead, "Brief", SYNTHESIS, prompt)
 
 
-def write_report(question: str, turns: list[Turn], outdir: Path, rounds: int) -> Path:
-    path = _report_path(question, outdir)
+def write_report(question: str, turns: list[Turn], outdir: Path, rounds: int, report_path: Path | None = None) -> Path:
+    path = report_path or _report_path(question, outdir)
     md_text = "\n".join(_report_lines(question, turns, rounds))
     path.write_text(md_text, encoding="utf-8")
+    write_sidecar_json(path, question, turns, rounds)
     return write_html_copy(path, md_text, question)
+
+
+def write_sidecar_json(path: Path, question: str, turns: list[Turn], rounds: int) -> Path:
+    payload = _build_sidecar_payload(question, turns, rounds)
+    json_path = path.with_suffix(".json")
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return json_path
+
+
+def _build_sidecar_payload(question: str, turns: list[Turn], rounds: int) -> dict:
+    turn_dicts = [_turn_to_dict(i, t) for i, t in enumerate(turns[:-1], 1)]
+    return {
+        "question": question,
+        "rounds": rounds,
+        "created_at": dt.datetime.now().isoformat(),
+        "brief": turns[-1].text if turns else "",
+        "turns": turn_dicts,
+    }
+
+
+def _turn_to_dict(i: int, t: Turn) -> dict:
+    return {
+        "index": i,
+        "model": t.model,
+        "role": t.role,
+        "text": t.text,
+        "seconds": round(t.seconds, 2),
+        "diagnostics": t.diagnostics,
+        "status": t.status,
+    }
 
 
 def _report_path(question: str, outdir: Path) -> Path:
     outdir.mkdir(parents=True, exist_ok=True)
-    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
     slug = re.sub(r"[^a-z0-9]+", "-", question.lower())[:50].strip("-") or "decision"
     return outdir / f"{stamp}_{slug}.md"
 
@@ -358,7 +611,7 @@ def _report_lines(question: str, turns: list[Turn], rounds: int) -> list[str]:
         turns[-1].text,
         "\n---\n",
         "# Appendix: Full adversarial debate\n",
-        _generation_note(rounds),
+        _generation_note_for_turns(rounds, turns),
         f"**Question:** {question}\n",
     ]
     body = [f"\n## Turn {i} — {t.model}: {t.role}\n\n{t.text}\n" for i, t in enumerate(turns[:-1], 1)]
@@ -368,6 +621,13 @@ def _report_lines(question: str, turns: list[Turn], rounds: int) -> list[str]:
 
 def _generation_note(rounds: int) -> str:
     labels = ", ".join(f"{name}={MODEL_LABELS[name]}" for name in PROVIDER_ORDER)
+    return f"*Generated {dt.datetime.now():%d %b %Y %H:%M} · {rounds} round(s) · {labels}*\n"
+
+
+def _generation_note_for_turns(rounds: int, turns: list[Turn]) -> str:
+    if not any(" / " in turn.model for turn in turns):
+        return _generation_note(rounds)
+    labels = ", ".join(f"{turn.role}={turn.model}" for turn in turns)
     return f"*Generated {dt.datetime.now():%d %b %Y %H:%M} · {rounds} round(s) · {labels}*\n"
 
 
@@ -470,7 +730,7 @@ def _fetch_models(base_url: str, key: str | None) -> list[str]:
         return ["(no API key set)"]
     from openai import OpenAI
 
-    client = OpenAI(base_url=base_url, api_key=key)
+    client = OpenAI(base_url=base_url, api_key=key, max_retries=0, timeout=15)
     return sorted(m.id for m in client.models.list().data)
 
 
@@ -506,12 +766,31 @@ def _add_parser_args(ap: argparse.ArgumentParser) -> None:
         "--context", "-c", action="append", default=[], help="Background file(s) to include (txt, md, csv). Repeatable."
     )
     ap.add_argument("--rounds", "-r", type=int, default=1, help="Full attack loops before the brief (default 1)")
-    ap.add_argument("--out", "-o", default="reports", help="Output folder (default ./reports)")
+    _add_output_arg(ap)
     ap.add_argument("--dry-run", action="store_true", help="Run the pipeline with fake responses (no API calls)")
     ap.add_argument("--list-models", action="store_true", help="List model IDs available to your API keys")
     ap.add_argument("--open", action="store_true", help="Open the finished brief in your browser")
     ap.add_argument("--providers", default=None, help="Comma-separated providers (e.g. mistral,openrouter)")
     ap.add_argument("--skip", action="append", default=[], help="Provider to skip (repeatable)")
+    _add_ui_args(ap)
+
+
+def _add_output_arg(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument(
+        "--out",
+        "-o",
+        default=os.getenv("COUNCIL_REPORTS_DIR", "reports"),
+        help="Output folder (default ./reports or COUNCIL_REPORTS_DIR)",
+    )
+
+
+def _add_ui_args(ap) -> None:
+    ap.add_argument("--models-json", action="store_true", help="List provider model catalogs as JSON")
+    ap.add_argument("--roles-json", help="Per-role provider/model assignments as JSON")
+    ap.add_argument("--resume-json", help="Completed turns to continue as JSON")
+    ap.add_argument("--request-id", default="")
+    ap.add_argument("--max-attempts", type=int, choices=[1], default=1)
+    ap.add_argument("--json-stream", action="store_true", help="Emit NDJSON events on stdout for UI integration")
 
 
 def _normalize_provider(name: str) -> str:
@@ -542,13 +821,25 @@ def _resolve_providers(a) -> tuple[str, ...]:
 
 def main():
     a = build_parser().parse_args()
+    if a.models_json:
+        clear_capability_cache()
+        return print(json.dumps(model_catalog()))
+    os.environ["COUNCIL_MAX_ATTEMPTS"] = "1"
     if a.list_models:
         return list_models()
     _validate_rounds(a)
     providers = _resolve_providers(a)
     question = _resolve_question(a)
+    providers = _prepare_assignments(a, providers)
     callers = resolve_callers(a.dry_run, providers)
     _run_and_report(a, question, _build_context(a), callers, providers)
+
+
+def _prepare_assignments(a, providers: tuple[str, ...]) -> tuple[str, ...]:
+    a.assignments = _parse_assignments(a.roles_json)
+    if a.assignments:
+        return tuple(dict.fromkeys(v["provider"] for v in a.assignments.values()))
+    return providers
 
 
 def _validate_rounds(a) -> None:
@@ -589,14 +880,109 @@ def _build_context(a) -> str:
 
 
 def _run_and_report(a, question: str, context: str, callers, providers: tuple[str, ...] = PROVIDER_ORDER) -> None:
-    total_calls = 1 + len(providers) * a.rounds + 1
-    print(f"Adversarial Council — {a.rounds} round(s), {total_calls} model calls")
-    session = Session(question.strip(), context, callers, a.rounds, providers=providers)
+    is_stream = bool(getattr(a, "json_stream", False))
+    total_calls = 2 + (4 if getattr(a, "assignments", {}) else len(providers)) * a.rounds
+    _notify_start(question, providers, a.rounds, total_calls, is_stream)
+    session = _prepare_session(a, question, context, callers, providers)
+    turns = _execute_session(session)
+    _journal_event(session, "run_completed")
+    path = write_report(question.strip(), turns, Path(a.out), a.rounds, session.checkpoint)
+    _checkpoint_session(session)
+    _publish_diagnostics(session)
+    _notify_done(a, path, is_stream)
+
+
+def _execute_session(session: Session) -> list[Turn]:
     try:
-        turns = run_council(session)
+        return run_council(session)
     except KeyboardInterrupt:
+        _end_failed_run(session, "run_cancelled")
         sys.exit("\nStopped.")
-    path = write_report(question.strip().splitlines()[0], turns, Path(a.out), a.rounds)
+    except Exception:
+        _end_failed_run(session, "run_failed")
+        raise
+
+
+def _prepare_session(a, question: str, context: str, callers, providers: tuple[str, ...]) -> Session:
+    session = Session(question.strip(), context, callers, a.rounds, providers=providers)
+    session.json_stream = bool(getattr(a, "json_stream", False))
+    session.assignments = getattr(a, "assignments", {})
+    session.dry_run = a.dry_run
+    session.turns = _resume_turns(getattr(a, "resume_json", None))
+    session.checkpoint = _report_path(question, Path(a.out))
+    session.run_config = _session_config(a, question)
+    session.journal = Journal(session.checkpoint.with_suffix(".events.jsonl"))
+    _start_journal(session, context)
+    _checkpoint_session(session)
+    _publish_diagnostics(session)
+    return session
+
+
+def _session_config(a, question: str) -> dict:
+    return {
+        "question": question,
+        "request_id": getattr(a, "request_id", ""),
+        "rounds": a.rounds,
+        "dry_run": a.dry_run,
+        "providers": list(_resolve_providers(a)) if not getattr(a, "assignments", {}) else [],
+        "context_files": getattr(a, "context", []),
+        "roles": getattr(a, "assignments", {}),
+        "max_attempts": 1,
+    }
+
+
+def _checkpoint_session(session: Session) -> None:
+    if session.checkpoint is None:
+        return
+    brief = session.turns[-1] if session.turns and session.turns[-1].role == "Brief" else None
+    turns = session.turns[:-1] if brief else session.turns
+    records = [_turn_to_dict(i, t) for i, t in enumerate(turns, 1)]
+    config = {**session.run_config, "completed_turns": records}
+    payload = _checkpoint_payload(session, records, brief, config)
+    private_write(session.checkpoint.with_suffix(".json"), payload)
+    if not session.checkpoint.exists():
+        session.checkpoint.write_text(f"# Decision in progress\n\n**Question:** {session.question}\n", encoding="utf-8")
+
+
+def _checkpoint_payload(session: Session, records: list, brief: Turn | None, config: dict) -> dict:
+    return {
+        "question": session.question,
+        "rounds": session.rounds,
+        "turns": records,
+        "created_at": dt.datetime.now().isoformat(),
+        "brief": brief.text if brief else "",
+        "brief_turn": _turn_to_dict(len(records) + 1, brief) if brief else None,
+        "run_config": config,
+        "diagnostics": session_diagnostics(session.journal),
+        "failed_turn": _turn_to_dict(len(records) + 1, session.failed_turn) if session.failed_turn else None,
+    }
+
+
+def _notify_start(question: str, providers: tuple[str, ...], rounds: int, total_calls: int, is_stream: bool) -> None:
+    if is_stream:
+        evt = {
+            "type": "start",
+            "question": question.strip(),
+            "rounds": rounds,
+            "providers": list(providers),
+            "total_calls": total_calls,
+        }
+        _emit_json_event(evt)
+        return
+    print(f"Adversarial Council — {rounds} round(s), {total_calls} model calls")
+
+
+def _notify_done(a, path: Path, is_stream: bool) -> None:
+    html_path = path.with_suffix(".html")
+    has_html = html_path.is_file()
+    if is_stream:
+        evt = {
+            "type": "done",
+            "report_path": str(path.resolve()),
+            "html_path": str(html_path.resolve()) if has_html else None,
+        }
+        _emit_json_event(evt)
+        return
     print(f"\n✅ Decision brief saved to: {path.resolve()}")
     if a.open:
         _open_report(path)
@@ -627,5 +1013,39 @@ def resolve_callers(dry_run: bool, providers: tuple[str, ...] = PROVIDER_ORDER):
     return {k: CALLERS[k] for k in providers}
 
 
+def _start_journal(session: Session, context: str) -> None:
+    _journal_event(
+        session,
+        "run_started",
+        config={k: v for k, v in session.run_config.items() if k not in {"question", "context_files"}},
+        question_sha256=fingerprint(session.question),
+        environment=environment_facts(),
+        resumed_turns=len(session.turns),
+        context_sha256=fingerprint(context),
+        pid=os.getpid(),
+    )
+
+
+def _end_failed_run(session: Session, event: str) -> None:
+    _journal_event(session, event)
+    _checkpoint_session(session)
+    _publish_diagnostics(session)
+
+
+def _publish_diagnostics(session: Session) -> None:
+    if session.json_stream:
+        _emit_json_event({"type": "diagnostics", "diagnostics": session_diagnostics(session.journal)})
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as exc:
+        if exc.code and "--json-stream" in sys.argv:
+            _emit_json_event({"type": "error", "message": _safe_error(exc)})
+        raise
+    except Exception as exc:
+        if "--json-stream" in sys.argv:
+            _emit_json_event({"type": "error", "message": _safe_error(exc)})
+            sys.exit(1)
+        raise
