@@ -3,13 +3,20 @@ use egui::{Grid, RichText, Ui};
 use crate::ui::theme::Theme;
 
 pub fn render_help_view(ui: &mut Ui, theme: &Theme) {
-    crate::ui::theme::page_heading(ui, RichText::new("How this works").color(theme.accent));
+    crate::ui::theme::page_intro(
+        ui,
+        theme,
+        "MEET THE CREW",
+        "How this works",
+        "One question. Different points of view. You stay in charge.",
+    );
+    crate::ui::theme::card(theme).show(ui, |ui| {
     ui.push_id("help_content", |ui| {
         section(ui, theme, "What happens when you start");
         body(
             ui,
             theme,
-            "You write one question and review its execution plan. Models assigned by role argue from different sides: one opens, the others attack its claims, then it answers them. At the end you get a brief with a recommendation and the tradeoffs behind it.",
+            "Write a question and check the plan before starting. One AI model suggests an idea. Three others take turns looking for problems in the reasoning. The first model answers those challenges. Then a model writes a brief: a short guide to the options, risks, and next steps.",
         );
         ui.add_space(12.0);
 
@@ -67,6 +74,7 @@ pub fn render_help_view(ui: &mut Ui, theme: &Theme) {
             theme,
             "Desktop decisions are stored in the configured reports folder. Browser decisions and uploaded documents are stored by the Council server. Real runs send the question and included document content to the selected providers.",
         );
+    });
     });
 }
 

@@ -1,9 +1,12 @@
 use crate::app::App;
 use crate::model::Claim;
-use egui::{Frame, RichText, Ui};
+use egui::{RichText, Ui};
 
 pub fn render_claims_view(ui: &mut Ui, app: &mut App) {
-    crate::ui::theme::heading(ui, "Claims & sources");
+    crate::ui::theme::page_heading(
+        ui,
+        RichText::new("Claims & sources").color(app.theme.accent),
+    );
     ui.label("These labels describe the debate, not independent verification. An unchallenged claim was simply not challenged. Excerpt matching establishes text occurrence in supplied material, not truth.");
     ui.add(
         egui::TextEdit::singleline(&mut app.claim_search)
@@ -36,7 +39,7 @@ pub fn render_claims_view(ui: &mut Ui, app: &mut App) {
 fn claim_card(ui: &mut Ui, app: &mut App, idx: usize) -> Option<(usize, egui::Id)> {
     let claim = app.claims[idx].clone();
     let mut open = None;
-    Frame::new().fill(app.theme.card_bg).corner_radius(8).inner_margin(16).show(ui, |ui| {
+    crate::ui::theme::card(&app.theme).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let compact = ui.available_width() < 400.0;
         let attribution = format!("Stage {} · {}", claim.turn_index, claim.author_model);

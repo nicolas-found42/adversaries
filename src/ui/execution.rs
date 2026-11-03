@@ -15,13 +15,13 @@ pub fn show(ctx: &Context, app: &mut App) {
                 .id_salt("compact_execution_review")
                 .max_height((ctx.content_rect().height() - 40.0).max(80.0))
                 .show(ui, |ui| {
-                    crate::ui::theme::heading(ui, "Review before starting");
+                    review_heading(ui, app);
                     plan_body(ui, app, &review);
                     ui.separator();
                     actions(ui, app, &review);
                 });
         } else {
-            crate::ui::theme::heading(ui, "Review before starting");
+            review_heading(ui, app);
             egui::ScrollArea::vertical()
                 .max_height((ctx.content_rect().height() - 220.0).max(120.0))
                 .show(ui, |ui| plan_body(ui, app, &review));
@@ -32,6 +32,12 @@ pub fn show(ctx: &Context, app: &mut App) {
     if response.should_close() {
         app.execution_review = None;
     }
+}
+
+fn review_heading(ui: &mut Ui, app: &App) {
+    crate::ui::theme::badge(ui, "READY TO GO?", app.theme.highlight);
+    crate::ui::theme::heading(ui, "Review before starting");
+    ui.label("Check the question, the crew, and what will be shared.");
 }
 
 fn plan_body(ui: &mut Ui, app: &App, review: &ExecutionReview) {
@@ -60,7 +66,7 @@ fn plan_body(ui: &mut Ui, app: &App, review: &ExecutionReview) {
             "Starting this plan stops the active run. In-flight requests may still be charged.",
         );
     }
-    recipients(ui, review);
+    recipients(ui, review, &app.theme);
     input_check(ui, review);
     ui.label(if review.config.dry_run {
         "The engine uses simulated responses. No inference request is sent to a model provider. Browser attachments may already have been uploaded to the Council server."
@@ -73,7 +79,11 @@ fn plan_body(ui: &mut Ui, app: &App, review: &ExecutionReview) {
     }
 }
 
-fn recipients(ui: &mut Ui, review: &ExecutionReview) {
+fn recipients(ui: &mut Ui, review: &ExecutionReview, theme: &crate::ui::theme::Theme) {
+    crate::ui::theme::card(theme).show(ui, |ui| recipient_list(ui, review));
+}
+
+fn recipient_list(ui: &mut Ui, review: &ExecutionReview) {
     ui.separator();
     ui.strong("Recipients and role assignments");
     for (key, title) in crate::roles::ROLES {
@@ -113,7 +123,7 @@ fn actions(ui: &mut Ui, app: &mut App, review: &ExecutionReview) {
         if ui
             .add_enabled(
                 review.ready(),
-                egui::Button::new(RichText::new(review.action_label()).strong()),
+                crate::ui::theme::primary_button(&app.theme, review.action_label()),
             )
             .clicked()
         {

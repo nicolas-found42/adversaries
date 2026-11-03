@@ -38,6 +38,10 @@ fn prefers_reduced_motion() -> bool {
 }
 
 impl eframe::App for CouncilApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        ui::sculpture::destroy();
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         council_ui::accessibility::input(ctx, raw);

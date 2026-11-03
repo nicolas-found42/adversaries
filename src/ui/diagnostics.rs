@@ -2,7 +2,13 @@ use crate::app::App;
 use egui::{RichText, Ui};
 
 pub fn render(ui: &mut Ui, app: &App) {
-    super::theme::heading(ui, "Technical details");
+    super::theme::page_intro(
+        ui,
+        &app.theme,
+        "BEHIND THE SCENES",
+        "Technical details",
+        "Curious about the machinery? These are the recorded details for each model turn.",
+    );
     ui.add(
         egui::Label::new(
             RichText::new(
@@ -36,7 +42,7 @@ pub fn render(ui: &mut Ui, app: &App) {
     ui.add_space(12.0);
     ui.push_id("diagnostics", |ui| {
         for turn in &app.turns {
-            stage(ui, turn);
+            super::theme::card(&app.theme).show(ui, |ui| stage(ui, turn));
         }
         raw_details(ui, "Everything as text", &text);
     });

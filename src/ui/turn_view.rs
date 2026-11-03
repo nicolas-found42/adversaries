@@ -23,6 +23,7 @@ pub fn render_turn_view(ui: &mut Ui, app: &mut App) {
     let heading =
         crate::ui::theme::heading(ui, format!("Reading: stage {} · {}", turn.index, turn.role));
     ui.label(RichText::new(&turn.model).color(app.theme.text_muted));
+    super::playful::role_caption(ui, &app.theme, &turn.role);
     if turn.status == TurnStatus::Running {
         ui.spinner();
         ui.label(
@@ -77,7 +78,7 @@ fn scroll_to_reading(heading: &egui::Response, app: &App) {
 
 fn chronology(ui: &mut Ui, app: &mut App) {
     crate::ui::theme::disclosure(ui, "Stage sequence — choose an argument")
-        .default_open(true)
+        .default_open(ui.available_width() >= 500.0)
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 crate::ui::theme::horizontal_group(ui, "Argument stages");
@@ -115,9 +116,10 @@ fn source_inspection(ui: &mut Ui, app: &mut App) {
         return;
     }
     statement_comparison(ui, app, &claim);
-    if app.source_jump {
+    let resized = source_layout_changed(ui, &claim);
+    if app.source_jump || resized {
         back.request_focus();
-        back.scroll_to_me(Some(egui::Align::TOP));
+        back.scroll_to_me_animation(Some(egui::Align::TOP), egui::style::ScrollAnimation::none());
         app.source_jump = false;
     }
     supplied_material(ui, app, &claim);
@@ -130,6 +132,16 @@ fn source_inspection(ui: &mut Ui, app: &mut App) {
             .join(", ");
         ui.label(format!("Ambiguous references in stages {stages}: this label identifies multiple statements. No later outcome is attributed without a unique origin."));
     }
+}
+
+fn source_layout_changed(ui: &Ui, claim: &crate::model::Claim) -> bool {
+    let id = ui.make_persistent_id(("source_viewport_width", claim.origin_key()));
+    let width = ui.ctx().content_rect().width();
+    ui.ctx().data_mut(|data| {
+        let previous = data.get_temp::<f32>(id);
+        data.insert_temp(id, width);
+        previous.is_some_and(|previous| (previous - width).abs() > 0.5)
+    })
 }
 
 fn statement_comparison(ui: &mut Ui, app: &App, claim: &crate::model::Claim) {
@@ -155,29 +167,26 @@ fn statement_comparison(ui: &mut Ui, app: &App, claim: &crate::model::Claim) {
 }
 
 fn selected_statement(ui: &mut Ui, app: &App, claim: &crate::model::Claim) {
-    egui::Frame::new()
-        .fill(app.theme.accent.gamma_multiply(0.12))
-        .inner_margin(16)
-        .show(ui, |ui| {
-            ui.strong(format!(
-                "{} · originating statement · stage {}",
-                claim.id, claim.turn_index
-            ));
-            let exact = app
-                .turns
-                .iter()
-                .find(|t| t.index == claim.turn_index)
-                .and_then(|t| t.text.get(claim.source_start..claim.source_end));
-            ui.label(exact.unwrap_or(&claim.text));
-            ui.label(format!(
-                "Source relationship: {}",
-                super::claims::provenance(claim)
-            ));
-            ui.label(format!(
-                "Parsed debate outcome: {} — not independent verification",
-                claim.verdict.as_str()
-            ));
-        });
+    super::theme::feature_card(&app.theme, app.theme.accent).show(ui, |ui| {
+        ui.strong(format!(
+            "{} · originating statement · stage {}",
+            claim.id, claim.turn_index
+        ));
+        let exact = app
+            .turns
+            .iter()
+            .find(|t| t.index == claim.turn_index)
+            .and_then(|t| t.text.get(claim.source_start..claim.source_end));
+        ui.label(exact.unwrap_or(&claim.text));
+        ui.label(format!(
+            "Source relationship: {}",
+            super::claims::provenance(claim)
+        ));
+        ui.label(format!(
+            "Parsed debate outcome: {} — not independent verification",
+            claim.verdict.as_str()
+        ));
+    });
 }
 
 fn compared_statement(

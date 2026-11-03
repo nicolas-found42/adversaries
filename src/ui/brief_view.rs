@@ -1,8 +1,8 @@
 use crate::app::App;
 use crate::brief::{qualified_export, sections};
 use crate::model::Tab;
-use crate::ui::reader;
-use egui::{RichText, Ui};
+use crate::ui::{reader, theme};
+use egui::Ui;
 
 pub fn render_brief_view(ui: &mut Ui, app: &mut App) {
     if !app.has_brief() {
@@ -10,16 +10,16 @@ pub fn render_brief_view(ui: &mut Ui, app: &mut App) {
         return;
     }
     let practice = app.demo_mode || app.last_config.as_ref().is_some_and(|c| c.dry_run);
-    ui.label(
-        RichText::new(if practice {
+    theme::badge(
+        ui,
+        if practice {
             "BRIEF READY · PRACTICE EXAMPLE"
         } else {
             "BRIEF READY · AI-GENERATED RECOMMENDATION"
-        })
-        .color(app.theme.accent)
-        .strong(),
+        },
+        app.theme.success,
     );
-    ui.label("Model-generated content, not independently verified. Completion does not establish consensus.");
+    ui.label("AI wrote this guide. Check the facts before choosing. Model-generated content, not independently verified. Completion does not establish consensus.");
     recommendation_and_sections(ui, app, practice);
     crate::ui::theme::disclosure(ui, "Original generated brief").show(ui, |ui| {
         reader::body(ui, &app.brief_text, &mut app.markdown_cache);
@@ -97,14 +97,10 @@ fn recommendation_and_sections(ui: &mut Ui, app: &mut App, practice: bool) {
         );
         return;
     };
-    egui::Frame::new()
-        .fill(app.theme.accent.gamma_multiply(0.10))
-        .inner_margin(20)
-        .corner_radius(8)
-        .show(ui, |ui| {
-            crate::ui::theme::heading(ui, "Recommendation");
-            reader::body(ui, &recommendation, &mut app.markdown_cache);
-        });
+    theme::feature_card(&app.theme, app.theme.success).show(ui, |ui| {
+        crate::ui::theme::heading(ui, "Recommendation");
+        reader::body(ui, &recommendation, &mut app.markdown_cache);
+    });
     brief_actions(ui, app, practice);
     let inline = crate::brief::inline_value(&app.brief_text, "Recommendation:").is_some();
     if let Some(confidence) = crate::brief::inline_value(&app.brief_text, "Confidence:") {

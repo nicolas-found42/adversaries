@@ -4,7 +4,9 @@ pub mod composer;
 pub mod diagnostics;
 mod execution;
 pub mod help;
+pub mod playful;
 pub(crate) mod reader;
+pub mod sculpture;
 pub mod sessions;
 mod table;
 pub mod theme;
@@ -123,7 +125,10 @@ fn navigation(ui: &mut Ui, app: &mut App) {
 
 fn navigation_items(ui: &mut Ui, app: &mut App) -> bool {
     let mut changed = false;
-    if ui.button("New decision").clicked() {
+    if ui
+        .add(theme::primary_button(&app.theme, "New decision"))
+        .clicked()
+    {
         app.composer_open = true;
         changed = true;
     }
@@ -154,6 +159,10 @@ fn navigation_items(ui: &mut Ui, app: &mut App) -> bool {
         changed = true;
     }
     text_size_control(ui);
+    let mut motion = app.theme.motion_seconds > 0.0;
+    if ui.checkbox(&mut motion, "Animations").changed() {
+        app.theme.motion_seconds = if motion { 0.2 } else { 0.0 };
+    }
     changed
 }
 
@@ -201,6 +210,7 @@ fn workspace(ui: &mut Ui, app: &mut App, room_for_panel: bool) {
     }
     decision_question(ui, &app.current_question);
     ui.add_space(12.0);
+    workspace_journey(ui, app);
     workspace_actions(ui, app, room_for_panel);
     ui.add_space(12.0);
     workspace_tabs(ui, app);
@@ -210,6 +220,13 @@ fn workspace(ui: &mut Ui, app: &mut App, room_for_panel: bool) {
     let recovery = workspace_notice(ui, app);
     if !recovery || app.active_tab != Tab::Brief || app.has_brief() {
         active_view(ui, app);
+    }
+}
+
+fn workspace_journey(ui: &mut Ui, app: &App) {
+    if app.source_claim.is_none() && app.is_running {
+        playful::journey(ui, app);
+        ui.add_space(12.0);
     }
 }
 
@@ -355,30 +372,29 @@ fn welcome_content(ui: &mut Ui, app: &mut App) {
     // On a short window the generous leading gap would push every step card past
     // the fold, so the page looked blank instead of scrollable.
     let short = ui.available_height() < 620.0;
-    let (top_gap, gap) = if short { (24.0, 16.0) } else { (100.0, 34.0) };
+    let (top_gap, gap) = if short { (24.0, 16.0) } else { (28.0, 24.0) };
     ui.add_space((ui.available_height() * 0.16).min(top_gap));
     ui.label(
         RichText::new("ADVERSARIAL COUNCIL")
             .small()
             .color(app.theme.accent),
     );
+    playful::crew(ui, app, true);
     ui.add_space(14.0);
     let title = ui.add(
         egui::Label::new(
-            RichText::new("A decision, argued from several sides.")
+            RichText::new("Big question? Meet your idea crew.")
                 .size(34.0)
                 .strong(),
         )
         .wrap(),
     );
-    theme::mark_heading(ui, &title, "A decision, argued from several sides.", 1);
+    theme::mark_heading(ui, &title, "Big question? Meet your idea crew.", 1);
     ui.add_space(14.0);
     if ui
         .add_sized(
             [ui.available_width().min(230.0), 48.0],
-            egui::Button::new(RichText::new("Start a decision").strong())
-                .fill(app.theme.accent.gamma_multiply(0.28))
-                .stroke(egui::Stroke::new(1.5, app.theme.accent)),
+            theme::primary_button(&app.theme, "Start a decision"),
         )
         .clicked()
     {
@@ -388,29 +404,34 @@ fn welcome_content(ui: &mut Ui, app: &mut App) {
     ui.add(
         egui::Label::new(
             RichText::new(
-                "Write the question you are facing. The council argues it, then gives you a brief with a recommendation and the tradeoffs behind it.",
+                "Ask a question. Watch AI models test ideas from different sides. Get a short guide to help you choose. You make the final call.",
             )
             .size(18.0)
             .color(app.theme.text_muted),
         )
         .wrap(),
     );
+    ui.label(
+        RichText::new("AI can get things wrong. A finished debate does not prove an idea is true.")
+            .small()
+            .color(app.theme.highlight),
+    );
     ui.add_space(gap);
     let steps = [
         (
             "01",
             "Write the question",
-            "One decision, with your options and deadline.",
+            "What are you choosing between? What matters most to you?",
         ),
         (
             "02",
             "The council debates",
-            "Different models attack each other's reasoning.",
+            "One model suggests an idea. Others look for problems. Then it gets a chance to reply.",
         ),
         (
             "03",
             "Read the brief",
-            "A recommendation, its tradeoffs, and next steps.",
+            "A short guide to the choices, the risks, and what to check next.",
         ),
     ];
     if ui.available_width() < 650.0 {
@@ -427,23 +448,24 @@ fn welcome_content(ui: &mut Ui, app: &mut App) {
 }
 
 fn step_card(ui: &mut Ui, app: &App, number: &str, title: &str, detail: &str) {
-    Frame::new()
-        .fill(app.theme.card_bg)
-        .corner_radius(10)
-        .inner_margin(16)
-        .show(ui, |ui| {
-            ui.set_min_height(100.0);
-            // `columns` lays its children out justified, which spreads a wrapped
-            // label's glyphs across the line. Left-align and wrap instead.
-            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(number).small().color(app.theme.accent));
-                ui.label(RichText::new(title).strong());
-                ui.add(egui::Label::new(
-                    RichText::new(detail).color(app.theme.text_muted),
-                ));
-            });
+    let color = match number {
+        "02" => app.theme.mistral,
+        "03" => app.theme.success,
+        _ => app.theme.accent,
+    };
+    theme::feature_card(&app.theme, color).show(ui, |ui| {
+        ui.set_min_height(118.0);
+        // `columns` lays its children out justified, which spreads a wrapped
+        // label's glyphs across the line. Left-align and wrap instead.
+        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+            ui.set_width(ui.available_width());
+            theme::badge(ui, number, color);
+            ui.label(RichText::new(title).strong());
+            ui.add(egui::Label::new(
+                RichText::new(detail).color(app.theme.text_muted),
+            ));
         });
+    });
 }
 
 /// A failed new launch must not relabel the retained decision as interrupted.
@@ -452,8 +474,7 @@ fn launch_failure_card(ui: &mut Ui, app: &mut App) {
         return;
     };
     let mut dismiss = false;
-    Frame::new().fill(app.theme.warning.gamma_multiply(0.09))
-        .inner_margin(16).corner_radius(8).show(ui, |ui| {
+    theme::feature_card(&app.theme, app.theme.warning).show(ui, |ui| {
             theme::heading(ui, "New run could not start");
             ui.label(if app.has_workspace() {
                 "Previous visible work remains available. This error belongs to the attempted new run, not to the decision below. No retry happens automatically."
@@ -482,11 +503,7 @@ fn load_failed_card(ui: &mut Ui, app: &mut App) {
     } else {
         "See all decisions"
     };
-    let card = Frame::new()
-        .fill(app.theme.warning.gamma_multiply(0.09))
-        .stroke(egui::Stroke::new(1.5, app.theme.warning.gamma_multiply(0.6)))
-        .corner_radius(8)
-        .inner_margin(16)
+    let card = theme::feature_card(&app.theme, app.theme.warning)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(
@@ -524,11 +541,7 @@ fn load_failed_card(ui: &mut Ui, app: &mut App) {
 }
 
 fn unfinished_card(ui: &mut Ui, app: &mut App) {
-    Frame::new()
-        .fill(app.theme.card_bg)
-        .stroke(egui::Stroke::new(1.0, app.theme.border))
-        .corner_radius(8)
-        .inner_margin(16)
+    theme::card(&app.theme)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(
@@ -574,11 +587,7 @@ fn unfinished_card(ui: &mut Ui, app: &mut App) {
 }
 
 fn error_card(ui: &mut Ui, app: &mut App, error: &str) {
-    Frame::new()
-        .fill(app.theme.error.gamma_multiply(0.09))
-        .stroke(egui::Stroke::new(1.5, app.theme.error.gamma_multiply(0.6)))
-        .corner_radius(8)
-        .inner_margin(16)
+    theme::feature_card(&app.theme, app.theme.error)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(

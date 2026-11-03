@@ -3,7 +3,13 @@ use egui::{RichText, Ui};
 use crate::app::App;
 
 pub fn render_sessions_view(ui: &mut Ui, app: &mut App) {
-    crate::ui::theme::page_heading(ui, RichText::new("All decisions").color(app.theme.accent));
+    crate::ui::theme::page_intro(
+        ui,
+        &app.theme,
+        "YOUR IDEA SHELF",
+        "All decisions",
+        "Pick up a question you explored before. Opening it does not ask the models to run again.",
+    );
     history_status(ui, app);
     if app.sessions.is_empty() {
         ui.label(
@@ -146,7 +152,7 @@ fn session_row(ui: &mut Ui, app: &mut App, idx: usize) {
                 app.theme.border
             },
         ))
-        .corner_radius(8)
+        .corner_radius(16)
         .inner_margin(12);
     let painted = row
         .show(ui, |ui| {
@@ -198,6 +204,13 @@ fn select_session_row(response: &egui::Response, app: &mut App, idx: usize, path
 }
 
 fn render_session_preview(ui: &mut Ui, app: &mut App, show_open: bool) {
+    crate::ui::theme::feature_card(&app.theme, app.theme.accent).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        session_preview_content(ui, app, show_open);
+    });
+}
+
+fn session_preview_content(ui: &mut Ui, app: &mut App, show_open: bool) {
     // Copy what the pane needs so the action below can mutate `app` without
     // holding a borrow of the session list.
     let Some(session) = app.sessions.get(app.selected_session) else {
@@ -258,7 +271,8 @@ fn open_saved_button(ui: &mut Ui, app: &mut App, path: &str, label: &str) {
     if ui
         .add_enabled(
             !app.is_running && !app.session_opening(),
-            egui::Button::new(label).min_size(egui::vec2(ui.available_width().min(320.0), 44.0)),
+            crate::ui::theme::primary_button(&app.theme, label)
+                .min_size(egui::vec2(ui.available_width().min(320.0), 44.0)),
         )
         .clicked()
     {

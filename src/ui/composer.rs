@@ -64,8 +64,9 @@ pub fn show_modal(ctx: &Context, app: &mut App) {
 }
 
 fn composer_intro(ui: &mut Ui, app: &App) {
+    crate::ui::theme::badge(ui, "01 / ASK", app.theme.accent);
     crate::ui::theme::heading(ui, "Start a decision");
-    ui.label(RichText::new("Write the question you are deciding. The council argues it from different sides, then writes a brief.").color(app.theme.text_muted));
+    ui.label(RichText::new("What are you choosing? The models suggest an idea, look for problems, and write a short guide. You decide what to do.").color(app.theme.text_muted));
     ui.add_space(10.0);
 }
 
@@ -108,9 +109,7 @@ fn composer_footer(ui: &mut Ui, app: &mut App) {
         if ui
             .add_enabled(
                 blocker.is_none(),
-                egui::Button::new(RichText::new(label).strong())
-                    .fill(app.theme.accent.gamma_multiply(0.28))
-                    .stroke(egui::Stroke::new(1.5, app.theme.accent))
+                crate::ui::theme::primary_button(&app.theme, label)
                     .min_size(egui::vec2(action_width, 44.0)),
             )
             .clicked()
@@ -304,62 +303,56 @@ fn council_editor(ui: &mut Ui, app: &mut App) {
 }
 
 fn role_row(ui: &mut Ui, app: &mut App, role: &str, title: &str) {
-    egui::Frame::new()
-        .fill(app.theme.bg)
-        .corner_radius(7)
-        .inner_margin(12)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(title).strong());
-            let layout = if ui.available_width() < 500.0 {
-                egui::Layout::top_down(egui::Align::LEFT)
-            } else {
-                egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true)
+    crate::ui::theme::card(&app.theme).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(title).strong());
+        let layout = if ui.available_width() < 500.0 {
+            egui::Layout::top_down(egui::Align::LEFT)
+        } else {
+            egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true)
+        };
+        ui.with_layout(layout, |ui| {
+            let Some(selection) = app.composer_state.roles.get_mut(role) else {
+                return;
             };
-            ui.with_layout(layout, |ui| {
-                let Some(selection) = app.composer_state.roles.get_mut(role) else {
-                    return;
-                };
-                ui.label(RichText::new("Model").small().color(app.theme.text_muted));
-                provider_select(ui, selection, title);
-                let catalog = app
-                    .catalog
-                    .iter()
-                    .find(|c| c.provider == selection.provider);
-                model_select(
-                    ui,
-                    selection,
-                    catalog,
-                    app.composer_state.searches.entry(role.into()).or_default(),
-                    title,
-                );
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("Model ID")
-                        .small()
-                        .color(app.theme.text_muted),
-                );
-                if let Some(selection) = app.composer_state.roles.get_mut(role) {
-                    ui.add(
-                        TextEdit::singleline(&mut selection.model)
-                            .desired_width(ui.available_width().min(390.0))
-                            .hint_text("Type an exact model ID if it is not in the list"),
-                    )
-                    .accessible_name(format!("{title}: exact model ID"));
-                }
-            });
-            if let Some(catalog) = app
+            ui.label(RichText::new("Model").small().color(app.theme.text_muted));
+            provider_select(ui, selection, title);
+            let catalog = app
                 .catalog
                 .iter()
-                .find(|c| c.provider == app.composer_state.roles[role].provider)
-                && !catalog.error.is_empty()
-            {
+                .find(|c| c.provider == selection.provider);
+            model_select(
+                ui,
+                selection,
+                catalog,
+                app.composer_state.searches.entry(role.into()).or_default(),
+                title,
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Model ID")
+                    .small()
+                    .color(app.theme.text_muted),
+            );
+            if let Some(selection) = app.composer_state.roles.get_mut(role) {
                 ui.add(
-                    egui::Label::new(RichText::new(&catalog.error).color(app.theme.warning)).wrap(),
-                );
+                    TextEdit::singleline(&mut selection.model)
+                        .desired_width(ui.available_width().min(390.0))
+                        .hint_text("Type an exact model ID if it is not in the list"),
+                )
+                .accessible_name(format!("{title}: exact model ID"));
             }
         });
+        if let Some(catalog) = app
+            .catalog
+            .iter()
+            .find(|c| c.provider == app.composer_state.roles[role].provider)
+            && !catalog.error.is_empty()
+        {
+            ui.add(egui::Label::new(RichText::new(&catalog.error).color(app.theme.warning)).wrap());
+        }
+    });
 }
 
 fn provider_select(ui: &mut Ui, selection: &mut Selection, title: &str) {

@@ -66,7 +66,7 @@ fn card(ui: &mut Ui, app: &mut App, idx: usize) {
                 app.theme.border
             },
         ))
-        .corner_radius(8)
+        .corner_radius(16)
         .inner_margin(14)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
