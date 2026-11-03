@@ -13,13 +13,36 @@ struct CouncilApp {
 
 impl CouncilApp {
     fn new(demo_mode: bool, question: Option<String>, dry_run: bool) -> Self {
-        Self {
-            app: App::new(demo_mode, question, dry_run),
-        }
+        let mut app = App::new(demo_mode, question, dry_run);
+        app.refresh_sessions();
+        #[cfg(target_arch = "wasm32")]
+        let app = {
+            let mut app = app;
+            if prefers_reduced_motion() {
+                app.theme.motion_seconds = 0.0;
+            }
+            app
+        };
+        Self { app }
     }
 }
 
+/// Reads the operating system's reduced-motion setting. Only the browser build
+/// can ask for it; the native window keeps egui's default animation.
+#[cfg(target_arch = "wasm32")]
+fn prefers_reduced_motion() -> bool {
+    web_sys::window()
+        .and_then(|window| window.match_media("(prefers-reduced-motion: reduce)").ok())
+        .flatten()
+        .is_some_and(|query| query.matches())
+}
+
 impl eframe::App for CouncilApp {
+    #[cfg(target_arch = "wasm32")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        council_ui::accessibility::input(ctx, raw);
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.app.tick();
         self.app.handle_keys(ctx);
@@ -29,7 +52,13 @@ impl eframe::App for CouncilApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(not(target_arch = "wasm32"))]
         ui::render(ui, &mut self.app);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let workspace = ui::render_with_workspace(ui, &mut self.app);
+            council_ui::accessibility::output(ui.ctx(), &workspace.value().to_string());
+        }
         if self.app.should_quit {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -105,5 +134,8 @@ fn main() {
             )
             .await
             .expect("eframe web start failed");
+        if let Some(loading) = document.get_element_by_id("loading_text") {
+            loading.remove();
+        }
     });
 }
