@@ -50,25 +50,54 @@ def _record(event: str, details: dict) -> None:
 
 
 def complete(client, model: str, messages: list[dict], provider: str) -> Completion:
-    cap = discover(provider, model, client)
-    parameters, policy = request_policy(cap, messages)
-    details = {"call_id": uuid.uuid4().hex, "provider": provider, "selected_model": model, "policy": policy}
+    details = {"call_id": uuid.uuid4().hex, "provider": provider, "selected_model": model}
+    _record("request_preparation_started", details)
+    parameters = _prepare_request(client, model, messages, provider, details)
     _request_snapshot(details, messages)
     _record("request_started", details)
     started = time.monotonic()
     try:
         response = client.chat.completions.create(model=model, messages=messages, **parameters)
     except Exception as error:
-        raise _request_failed(error, {**details, "seconds": time.monotonic() - started}) from error
-    result = _response_result(response, {**details, "seconds": time.monotonic() - started})
-    _record("request_finished", result.diagnostics)
-    return _validate_result(result)
+        # The SDK message may quote a credential. The scrubbed facts reach the journal,
+        # so the console never prints the unscrubbed chain.
+        raise _request_failed(error, {**details, "seconds": time.monotonic() - started}) from None
+    return _process_response(response, {**details, "seconds": time.monotonic() - started})
+
+
+def _process_response(response, details: dict) -> Completion:
+    phase = "decode"
+    try:
+        result = _response_result(response, details)
+        _record("request_finished", result.diagnostics)
+        phase = "validation"
+        return _validate_result(result)
+    except Exception as error:
+        _record("response_processing_failed", {**details, "phase": phase, **error_facts(error)})
+        raise
+
+
+def _prepare_request(client, model, messages, provider, details):
+    preparation_started = time.monotonic()
+    phase = "discovery"
+    try:
+        cap = discover(provider, model, client)
+        phase = "policy"
+        parameters, policy = request_policy(cap, messages)
+    except Exception as error:
+        _record(
+            "request_preparation_failed",
+            {**details, "phase": phase, "seconds": time.monotonic() - preparation_started, **error_facts(error)},
+        )
+        raise
+    details.update(policy=policy, preparation_seconds=time.monotonic() - preparation_started)
+    return parameters
 
 
 def _request_failed(error: Exception, details: dict) -> ProviderRequestError:
     failure = {**details, **error_facts(error)}
     _record("request_failed", failure)
-    return ProviderRequestError(str(error), failure)
+    return ProviderRequestError(scrub(str(error)), failure)
 
 
 def _request_snapshot(details: dict, messages: list[dict]) -> None:

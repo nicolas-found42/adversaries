@@ -1,6 +1,7 @@
 """Automatic policy and diagnostic recovery, using SDK HTTP mocks, never paid calls."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx2 as httpx
@@ -8,9 +9,10 @@ import pytest
 from openai import OpenAI
 
 import council
+import council_diagnostics as diagnostics
 import council_inference as inference
 import council_models as models
-from council_diagnostics import Journal, read_events
+from council_diagnostics import Journal, read_events, scrub
 
 
 @pytest.fixture
@@ -154,13 +156,58 @@ def test_request_journal_survives_with_no_keys_or_reasoning(isolated_cache, monk
     with inference.recording(journal):
         run_mock(response("secret-fixture-value"))
     events = read_events(journal.path)
-    assert [e["event"] for e in events] == ["request_started", "request_finished"]
+    assert [e["event"] for e in events] == ["request_preparation_started", "request_started", "request_finished"]
     assert events[-1]["actual_model"] == "actual-model"
     assert "PRIVATE THINKING" not in journal.path.read_text()
     assert "secret-fixture-value" not in journal.path.read_text()
     assert journal.path.stat().st_mode & 0o777 == 0o600
-    snapshot = events[0]["request_snapshot"]
+    snapshot = events[1]["request_snapshot"]
     assert json.loads(__import__("pathlib").Path(snapshot).read_text())["messages"][0]["content"] == "Decision?"
+
+
+def test_preparation_failure_is_persisted_without_sending_request(tmp_path, monkeypatch):
+    def fail(*_):
+        raise ValueError("metadata unavailable")
+
+    monkeypatch.setattr(inference, "discover", fail)
+    journal = Journal(tmp_path / "run.events.jsonl")
+    with inference.recording(journal), pytest.raises(ValueError, match="metadata unavailable"):
+        inference.complete(None, "model", [], "OpenRouter")
+    started, failed = read_events(journal.path)
+    assert started["event"] == "request_preparation_started"
+    assert failed["event"] == "request_preparation_failed"
+    assert failed["call_id"] == started["call_id"]
+    assert failed["phase"] == "discovery"
+    assert failed["seconds"] >= 0
+
+
+def test_invalid_response_records_validation_failure(isolated_cache):
+    journal = Journal(isolated_cache / "invalid.events.jsonl")
+    with inference.recording(journal), pytest.raises(inference.IncompleteCompletionError):
+        run_mock(response("private response text", "length"))
+    events = read_events(journal.path)
+    finished, failed = events[-2:]
+    assert finished["event"] == "request_finished"
+    assert failed["event"] == "response_processing_failed"
+    assert failed["phase"] == "validation"
+    assert failed["call_id"] == finished["call_id"]
+    assert failed["finish_reason"] == "length"
+    assert "private response text" not in journal.path.read_text()
+
+
+def test_response_decode_failure_is_persisted(tmp_path):
+    class BrokenResponse:
+        def model_dump(self):
+            raise ValueError("malformed response")
+
+    journal = Journal(tmp_path / "decode.events.jsonl")
+    with inference.recording(journal), pytest.raises(ValueError, match="malformed response"):
+        inference._process_response(BrokenResponse(), {"call_id": "call-1", "seconds": 0.5})
+    failure = read_events(journal.path)[-1]
+    assert failure["event"] == "response_processing_failed"
+    assert failure["phase"] == "decode"
+    assert failure["call_id"] == "call-1"
+    assert failure["error_type"] == "ValueError"
 
 
 def partial_caller(*_):
@@ -273,3 +320,61 @@ def test_ollama_nonreasoning_capability_list():
     cap = models.normalize("Ollama-Cloud", "plain", {"capabilities": ["completion", "tools"]})
     assert cap.reasoning is False
     assert models.request_policy(cap, [{"content": "x"}])[0] == {}
+
+
+def test_checkpoint_acknowledges_written_state(tmp_path, capsys):
+    session = council.Session("Q", "", {})
+    session.json_stream = True
+    session.checkpoint = tmp_path / "saved.md"
+    council._checkpoint_session(session)
+    event = json.loads(capsys.readouterr().out)
+    assert event["type"] == "checkpoint_saved"
+    assert event["completed_stages"] == 0
+    assert (tmp_path / "saved.json").is_file()
+    assert session.checkpoint.is_file()
+
+
+def test_scrub_redacts_newly_recognized_secrets_and_keeps_token_counts(monkeypatch):
+    secret = "ghp_" + "a" * 30
+    monkeypatch.setenv("GITHUB_TOKEN", secret)
+    details = scrub(
+        {
+            "message": f"Authorization failed for {secret}",
+            "usage": {"completion_tokens": 7, "prompt_tokens": 3},
+            "api_key": "dropped",
+        }
+    )
+    assert details["message"] == "Authorization failed for <redacted>"
+    assert details["usage"] == {"completion_tokens": 7, "prompt_tokens": 3}
+    assert "api_key" not in details
+
+
+def test_request_snapshot_is_written_owner_only(isolated_cache):
+    journal = Journal(isolated_cache / "run.events.jsonl")
+    path = Path(journal.snapshot("call-1", [{"role": "user", "content": "Decision?"}]))
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_private_text_creates_a_directory_it_replaces_nothing_elsewhere(tmp_path):
+    target = tmp_path / "nested" / "brief.md"
+    diagnostics.private_text(target, "brief")
+    assert target.read_text(encoding="utf-8") == "brief"
+    assert target.stat().st_mode & 0o777 == 0o600
+    diagnostics.private_text(target, "revised")
+    assert target.read_text(encoding="utf-8") == "revised"
+    assert not target.with_suffix(".md.tmp").exists()
+
+
+def test_provider_failure_does_not_chain_the_unscrubbed_sdk_message(monkeypatch):
+    monkeypatch.setenv("TEST_API_KEY", "secret-fixture-value")
+    monkeypatch.setattr(inference, "_prepare_request", lambda *_args: {})
+
+    def refuse(**_kwargs):
+        raise RuntimeError("rejected secret-fixture-value")
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=refuse)))
+    with pytest.raises(inference.ProviderRequestError) as caught:
+        inference.complete(client, "model", [], "OpenRouter")
+    assert "secret-fixture-value" not in str(caught.value)
+    assert caught.value.__cause__ is None

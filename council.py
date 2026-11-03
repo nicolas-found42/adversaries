@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import html
 import importlib
+import io
 import json
 import os
 import re
@@ -29,7 +31,16 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from council_diagnostics import Journal, environment_facts, fingerprint, private_write, session_diagnostics
+from council_diagnostics import (
+    Journal,
+    environment_facts,
+    fingerprint,
+    private_directory,
+    private_text,
+    private_write,
+    scrub,
+    session_diagnostics,
+)
 from council_inference import Completion, IncompleteCompletionError, complete, error_facts, recording
 from council_models import clear_capability_cache
 
@@ -40,30 +51,54 @@ for _s in (sys.stdout, sys.stderr):  # Windows consoles default to a legacy code
 
 
 def _load_env_files():
+    path = Path(__file__).with_name(".env")
     try:
         from dotenv import load_dotenv
 
-        load_dotenv(Path(__file__).with_name(".env"))
+        load_dotenv(path)
     except ImportError:
         pass
+    _warn_if_world_readable(path)
     _load_zshenv()
 
 
-def _load_zshenv():
-    zshenv = Path.home() / ".zshenv"
-    if not zshenv.is_file():
+def _warn_if_world_readable(path: Path) -> None:
+    if not hasattr(os, "getuid"):
         return
-    for line in zshenv.read_text(encoding="utf-8", errors="replace").splitlines():
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return
+    if mode & 0o077:
+        print(f"Warning: {path.name} is readable by other users. Run: chmod 600 {path.name}", file=sys.stderr)
+
+
+def _load_zshenv():
+    try:
+        text = (Path.home() / ".zshenv").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    for line in text.splitlines():
         _parse_export_line(line.strip())
 
 
 def _parse_export_line(line: str):
-    if not line.startswith("export "):
+    body = line.removeprefix("export ")
+    name, separator, raw = body.partition("=")
+    name = name.strip()
+    if body == line or not separator or not name.isidentifier():
         return
-    k, _, v = line.removeprefix("export ").partition("=")
-    k, v = k.strip(), v.strip("'\"")
-    if k and v and k not in os.environ:
-        os.environ[k] = v
+    value = _export_value(raw)
+    if value and name not in os.environ:
+        os.environ[name] = value
+
+
+def _export_value(raw: str) -> str:
+    value = raw.strip()
+    if value[:1] in {"'", '"'}:
+        end = value.find(value[0], 1)
+        return value[1:end] if end > 0 else ""
+    return value.split(" #")[0].strip()
 
 
 _load_env_files()
@@ -139,7 +174,7 @@ Produce:
 )
 
 SYNTHESIS = """You are the Chief of Staff writing for a busy executive. You have the full transcript of an
-adversarial debate between three AI models about a decision. Write a decision brief in Markdown:
+adversarial debate between the models assigned to council roles about a decision. A completed debate is not consensus, and surviving an attack is not independent verification. Distinguish supplied material, model assumptions, and unresolved disagreements. Write a decision brief in Markdown:
 
 # Decision Brief: <short title>
 **Recommendation:** one sentence. **Confidence:** Low / Medium / High (and why, in one line).
@@ -274,7 +309,7 @@ def _safe_error(error: BaseException) -> str:
         key = _provider_key(name)
         if key:
             message = message.replace(key, "<redacted>")
-    return message[:1200]
+    return str(scrub(message))[:1200]
 
 
 def model_catalog() -> list[dict]:
@@ -386,7 +421,13 @@ def _restore_turn(item: dict) -> Turn:
 def _resume_turns(raw: str | None) -> list[Turn]:
     if not raw:
         return []
-    return [_restore_turn(item) for item in json.loads(raw)]
+    items = json.loads(raw)
+    for index, item in enumerate(items, 1):
+        if item.get("index", index) != index:
+            raise ValueError(
+                "Saved work is not a contiguous prefix. Read it or review a new run; it cannot be continued safely."
+            )
+    return [_restore_turn(item) for item in items]
 
 
 # --------------------------------------------------------------- pipeline --
@@ -437,7 +478,10 @@ def _completed_stage(session: Session, turn: Turn, result) -> Turn:
     turn.text = _ground_supplied_claims(result.text, session).strip()
     turn.diagnostics = result.diagnostics
     session.turns.append(turn)
-    _journal_event(session, "stage_completed", model=turn.model, role=turn.role, diagnostics=turn.diagnostics)
+    _notify_stage_ready(session, turn)
+    _journal_event(
+        session, "stage_completed", model=turn.model, role=turn.role, seconds=turn.seconds, diagnostics=turn.diagnostics
+    )
     _notify_turn_complete(session, turn)
     return turn
 
@@ -453,11 +497,13 @@ def _failed_stage(session: Session, turn: Turn, error: BaseException) -> None:
     if isinstance(error, IncompleteCompletionError):
         turn.text = error.result.text
     session.failed_turn = turn
-    _journal_event(session, "stage_failed", model=turn.model, role=turn.role, diagnostics=turn.diagnostics)
-    _checkpoint_session(session)
-    _publish_diagnostics(session)
     if session.json_stream:
         _emit_json_event({"type": "turn_failed", **_turn_to_dict(len(session.turns) + 1, turn)})
+    _journal_event(
+        session, "stage_failed", model=turn.model, role=turn.role, seconds=turn.seconds, diagnostics=turn.diagnostics
+    )
+    _checkpoint_session(session)
+    _publish_diagnostics(session)
 
 
 def _ground_supplied_claims(text: str, session: Session) -> str:
@@ -484,11 +530,15 @@ def _notify_turn_start(session: Session, name: str, role: str) -> None:
     print(f"\n▶ {name} [{label}] — {role} ...", flush=True)
 
 
+def _notify_stage_ready(session: Session, turn: Turn) -> None:
+    if session.json_stream:
+        _emit_json_event(_turn_complete_event(session, turn))
+
+
 def _notify_turn_complete(session: Session, turn: Turn) -> None:
     _checkpoint_session(session)
     _publish_diagnostics(session)
     if session.json_stream:
-        _emit_json_event(_turn_complete_event(session, turn))
         return
     print(f"  ✓ {len(turn.text.split())} words in {turn.seconds:.0f}s")
     preview = re.sub(r"\s+", " ", turn.text)[:300]
@@ -542,12 +592,24 @@ ROUND_STEPS = _default_round_steps()
 def run_council(session: Session) -> list[Turn]:
     if session.assignments:
         return _run_assigned_council(session)
-    lead = session.providers[0]
-    run_turn(session, lead, "Opening", PROPOSER, transcript_text(session, []))
-    for _ in range(session.rounds):
-        _run_round(session)
-    _run_brief(session)
+    steps = _legacy_steps(session)
+    _validate_legacy_resume(session, steps)
+    for name, role, system in steps[len(session.turns) :]:
+        run_turn(session, name, role, system, _assigned_prompt(session, role))
     return session.turns
+
+
+def _legacy_steps(session: Session) -> list[tuple[str, str, str]]:
+    lead = session.providers[0]
+    return [(lead, "Opening", PROPOSER), *(_round_steps(session) * session.rounds), (lead, "Brief", SYNTHESIS)]
+
+
+def _validate_legacy_resume(session: Session, steps: list[tuple[str, str, str]]) -> None:
+    if len(session.turns) > len(steps):
+        raise ValueError("Saved turns exceed the configured debate length")
+    for turn, (model, role, _) in zip(session.turns, steps, strict=False):
+        if turn.model != model or turn.role != role:
+            raise ValueError("Saved turns do not match this council. Review a new run with the new assignments.")
 
 
 def _run_round(session: Session) -> None:
@@ -564,7 +626,7 @@ def _run_brief(session: Session) -> None:
 def write_report(question: str, turns: list[Turn], outdir: Path, rounds: int, report_path: Path | None = None) -> Path:
     path = report_path or _report_path(question, outdir)
     md_text = "\n".join(_report_lines(question, turns, rounds))
-    path.write_text(md_text, encoding="utf-8")
+    private_text(path, md_text)
     write_sidecar_json(path, question, turns, rounds)
     return write_html_copy(path, md_text, question)
 
@@ -572,7 +634,7 @@ def write_report(question: str, turns: list[Turn], outdir: Path, rounds: int, re
 def write_sidecar_json(path: Path, question: str, turns: list[Turn], rounds: int) -> Path:
     payload = _build_sidecar_payload(question, turns, rounds)
     json_path = path.with_suffix(".json")
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    private_text(json_path, json.dumps(payload, indent=2))
     return json_path
 
 
@@ -600,7 +662,7 @@ def _turn_to_dict(i: int, t: Turn) -> dict:
 
 
 def _report_path(question: str, outdir: Path) -> Path:
-    outdir.mkdir(parents=True, exist_ok=True)
+    private_directory(outdir)
     stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
     slug = re.sub(r"[^a-z0-9]+", "-", question.lower())[:50].strip("-") or "decision"
     return outdir / f"{stamp}_{slug}.md"
@@ -637,14 +699,24 @@ def write_html_copy(path: Path, md_text: str, question: str) -> Path:
     except ImportError:
         return path
     html_path = path.with_suffix(".html")
-    html_path.write_text(document, encoding="utf-8")
+    private_text(html_path, document)
     return html_path
+
+
+# Model output is attacker-influenced (a background document can instruct a model
+# to emit markup), so the copy opened in a browser runs no script and loads nothing.
+_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
 
 
 def _html_document(md_text: str, question: str) -> str:
     body = importlib.import_module("markdown").markdown(md_text, extensions=["tables", "sane_lists"])
     title = html.escape(question[:80])
-    return f"<!doctype html><meta charset='utf-8'><title>{title}</title><style>{_HTML_CSS}</style>{body}"
+    return (
+        "<!doctype html><meta charset='utf-8'>"
+        f"<meta http-equiv='Content-Security-Policy' content=\"{_CSP}\">"
+        "<meta name='referrer' content='no-referrer'>"
+        f"<title>{title}</title><style>{_HTML_CSS}</style>{body}"
+    )
 
 
 _HTML_CSS = (
@@ -656,35 +728,37 @@ _HTML_CSS = (
 
 
 def read_document(p: Path, limit: int = 60_000) -> str:
-    """Turn txt/md/csv/pdf/docx/xlsx into plain text for the models."""
-    try:
-        text = _read_text_for(p)
-    except Exception as e:
-        print(f"  ! Could not read {p.name}: {e}", file=sys.stderr)
-        return "(file could not be read)"
+    """Extract supported input, failing before inference when it is unreadable."""
+    text = _read_text_for(p)
+    if not text.strip():
+        raise ValueError(f"No readable text in {p.name}. Scanned documents may need OCR.")
     if len(text) > limit:
         text = text[:limit] + f"\n...[truncated — {len(text):,} characters total]"
     return text
 
 
 def _read_text_for(p: Path) -> str:
-    ext = p.suffix.lower()
+    return _read_document_bytes(p.suffix.lower(), p.read_bytes())
+
+
+def _read_document_bytes(ext: str, data: bytes) -> str:
+    source = io.BytesIO(data)
     if ext == ".pdf":
-        return _read_pdf(p)
+        return _read_pdf(source)
     if ext == ".docx":
-        return _read_docx(p)
+        return _read_docx(source)
     if ext in (".xlsx", ".xlsm"):
-        return _read_xlsx(p)
-    return p.read_text(encoding="utf-8", errors="replace")
+        return _read_xlsx(source)
+    return data.decode("utf-8")
 
 
-def _read_pdf(p: Path) -> str:
+def _read_pdf(p: Path | io.BytesIO) -> str:
     reader = importlib.import_module("pypdf").PdfReader
-    return "\n".join(page.extract_text() or "" for page in reader(str(p)).pages)
+    return "\n".join(page.extract_text() or "" for page in reader(p).pages)
 
 
-def _read_docx(p: Path) -> str:
-    document = importlib.import_module("docx").Document(str(p))
+def _read_docx(p: Path | io.BytesIO) -> str:
+    document = importlib.import_module("docx").Document(str(p) if isinstance(p, Path) else p)
     text = "\n".join(par.text for par in document.paragraphs)
     return text + _docx_tables(document)
 
@@ -693,9 +767,9 @@ def _docx_tables(d) -> str:
     return "".join("\n" + "\n".join(" | ".join(c.text for c in row.cells) for row in t.rows) for t in d.tables)
 
 
-def _read_xlsx(p: Path) -> str:
+def _read_xlsx(p: Path | io.BytesIO) -> str:
     openpyxl = importlib.import_module("openpyxl")
-    workbook = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
+    workbook = openpyxl.load_workbook(p, data_only=True, read_only=True)
     return "".join(_sheet_text(ws) for ws in workbook.worksheets)
 
 
@@ -713,7 +787,7 @@ def list_models():
         try:
             print(f"\n{name}:\n  " + "\n  ".join(fn()))
         except Exception as e:
-            print(f"\n{name}: could not list ({e})")
+            print(f"\n{name}: could not list ({_safe_error(e)})")
 
 
 def _model_sources():
@@ -785,6 +859,8 @@ def _add_output_arg(ap: argparse.ArgumentParser) -> None:
 
 
 def _add_ui_args(ap) -> None:
+    ap.add_argument("--config-stdin", action="store_true", help="Read a GUI execution plan as JSON from stdin")
+    ap.add_argument("--preflight-json", action="store_true", help="Check inputs without inference or saving a decision")
     ap.add_argument("--models-json", action="store_true", help="List provider model catalogs as JSON")
     ap.add_argument("--roles-json", help="Per-role provider/model assignments as JSON")
     ap.add_argument("--resume-json", help="Completed turns to continue as JSON")
@@ -821,9 +897,16 @@ def _resolve_providers(a) -> tuple[str, ...]:
 
 def main():
     a = build_parser().parse_args()
+    _load_ui_config(a)
+    if a.preflight_json:
+        return print(json.dumps(_preflight_report(a)))
     if a.models_json:
         clear_capability_cache()
         return print(json.dumps(model_catalog()))
+    _execute_args(a)
+
+
+def _execute_args(a):
     os.environ["COUNCIL_MAX_ATTEMPTS"] = "1"
     if a.list_models:
         return list_models()
@@ -831,8 +914,46 @@ def main():
     providers = _resolve_providers(a)
     question = _resolve_question(a)
     providers = _prepare_assignments(a, providers)
+    context = _build_context(a)
+    _claim_request(a)
     callers = resolve_callers(a.dry_run, providers)
-    _run_and_report(a, question, _build_context(a), callers, providers)
+    _run_and_report(a, question, context, callers, providers)
+
+
+def _claim_request(a) -> None:
+    if not a.request_id:
+        return
+    path = Path(a.out) / ".requests" / f"{fingerprint(a.request_id)}.json"
+    record = json.dumps({"request_id": a.request_id, "started_at": dt.datetime.now().isoformat()})
+    try:
+        private_text(path, record, exclusive=True)
+    except FileExistsError as error:
+        raise ValueError(
+            "This execution request was already attempted. Open its saved work or review a new run."
+        ) from error
+
+
+def _load_ui_config(a) -> None:
+    if not a.config_stdin:
+        return
+    data = json.load(sys.stdin)
+    _ui_scalar_fields(a, data)
+    a.context = data.get("context_files", [])
+    a.context_snapshot = data.get("context_snapshot")
+    a.roles_json = json.dumps(data["roles"]) if data.get("roles") else None
+    a.resume_json = json.dumps(data.get("completed_turns", []))
+    a.providers = ",".join(data.get("providers", []))
+
+
+def _ui_scalar_fields(a, data: dict) -> None:
+    for name, key in (
+        ("question", "question"),
+        ("rounds", "rounds"),
+        ("dry_run", "dry_run"),
+        ("request_id", "request_id"),
+    ):
+        if key in data:
+            setattr(a, name, data[key])
 
 
 def _prepare_assignments(a, providers: tuple[str, ...]) -> tuple[str, ...]:
@@ -871,12 +992,91 @@ def _prompt_for_question() -> str:
 
 
 def _build_context(a) -> str:
-    context = "\n\n".join(f"### {Path(p).name}\n{read_document(Path(p))}" for p in a.context)
+    snapshots = getattr(a, "context_snapshot", None)
+    if snapshots is not None:
+        context = "\n\n".join(_snapshot_context(item) for item in snapshots)
+    else:
+        context = "\n\n".join(f"### {Path(p).name}\n{read_document(Path(p))}" for p in a.context)
     if a.context:
         dest = sys.stderr if getattr(a, "json_stream", False) else sys.stdout
-        names = ", ".join(Path(p).name for p in a.context)
-        print(f"Included {len(a.context)} background file(s): {names}", file=dest)
+        print(f"Included {len(a.context)} background file(s): {', '.join(Path(p).name for p in a.context)}", file=dest)
     return context
+
+
+def _snapshot_context(item: dict) -> str:
+    text = item["text"]
+    if not isinstance(text, str) or not text.strip() or len(text) > 60_000:
+        raise ValueError("An approved document snapshot is empty or exceeds the extraction limit")
+    if fingerprint(text) != item["text_digest"]:
+        raise ValueError("An approved document snapshot changed; review inputs again")
+    note = (
+        f"\n[Only {len(text)} of {item['original_characters']} characters included]"
+        if item["original_characters"] > len(text)
+        else ""
+    )
+    return f"### {item['name']}\n{text}{note}"
+
+
+def _preflight_report(a) -> dict:
+    documents = _check_documents(a)
+    providers = _check_provider_access(a)
+    error = _preflight_plan_error(a)
+    ready = not error and all(not d["error"] for d in documents)
+    ready = ready and (a.dry_run or all(p["configured"] for p in providers))
+    return {"ready": bool(ready), "documents": documents, "providers": providers, "error": error}
+
+
+def _preflight_plan_error(a) -> str:
+    try:
+        if not a.question or not a.question.strip() or not 1 <= a.rounds <= 5:
+            return "Enter a question and choose one to five rounds."
+        selected = _prepare_assignments(a, _resolve_providers(a))
+        session = Session(a.question, "", {}, a.rounds, providers=selected)
+        session.assignments = a.assignments
+        session.turns = _resume_turns(a.resume_json)
+        if session.assignments:
+            _validate_resume(session, _assigned_steps(a.rounds))
+        else:
+            _validate_legacy_resume(session, _legacy_steps(session))
+        return ""
+    except (ValueError, KeyError, TypeError, SystemExit) as error:
+        return str(error)
+
+
+def _check_documents(a) -> list[dict]:
+    snapshots = getattr(a, "context_snapshot", None)
+    if snapshots is not None:
+        return [_check_snapshot(item) for item in snapshots]
+    return [_check_document(Path(p)) for p in a.context]
+
+
+def _check_document(path: Path) -> dict:
+    try:
+        data = path.read_bytes()
+        text = _read_document_bytes(path.suffix.lower(), data)
+        if not text.strip():
+            raise ValueError("No readable text. Scanned documents may need OCR.")
+        snapshot = {"name": path.name, "text": text[:60_000], "original_characters": len(text)}
+        snapshot.update(sha256=hashlib.sha256(data).hexdigest(), text_digest=fingerprint(snapshot["text"]))
+        return {"snapshot": snapshot, "error": ""}
+    except Exception as error:
+        return {"snapshot": {"name": path.name}, "error": f"Could not read {path.name}: {error}"}
+
+
+def _check_snapshot(item: dict) -> dict:
+    try:
+        _snapshot_context(item)
+        return {"snapshot": item, "error": ""}
+    except (KeyError, TypeError, ValueError) as error:
+        return {"snapshot": {"name": item.get("name", "Document")}, "error": str(error)}
+
+
+def _check_provider_access(a) -> list[dict]:
+    try:
+        selected = _prepare_assignments(a, _resolve_providers(a))
+        return [{"name": p, "configured": not _missing_keys((p,))} for p in selected]
+    except ValueError, KeyError, SystemExit:
+        return []
 
 
 def _run_and_report(a, question: str, context: str, callers, providers: tuple[str, ...] = PROVIDER_ORDER) -> None:
@@ -885,11 +1085,20 @@ def _run_and_report(a, question: str, context: str, callers, providers: tuple[st
     _notify_start(question, providers, a.rounds, total_calls, is_stream)
     session = _prepare_session(a, question, context, callers, providers)
     turns = _execute_session(session)
+    path = _write_session_report(a, question, turns, session)
     _journal_event(session, "run_completed")
-    path = write_report(question.strip(), turns, Path(a.out), a.rounds, session.checkpoint)
     _checkpoint_session(session)
     _publish_diagnostics(session)
     _notify_done(a, path, is_stream)
+
+
+def _write_session_report(a, question, turns, session):
+    try:
+        return write_report(question.strip(), turns, Path(a.out), a.rounds, session.checkpoint)
+    except Exception as error:
+        _journal_event(session, "report_failed", **error_facts(error))
+        _end_failed_run(session, "run_failed")
+        raise
 
 
 def _execute_session(session: Session) -> list[Turn]:
@@ -928,6 +1137,7 @@ def _session_config(a, question: str) -> dict:
         "context_files": getattr(a, "context", []),
         "roles": getattr(a, "assignments", {}),
         "max_attempts": 1,
+        "context_snapshot": getattr(a, "context_snapshot", None),
     }
 
 
@@ -941,7 +1151,15 @@ def _checkpoint_session(session: Session) -> None:
     payload = _checkpoint_payload(session, records, brief, config)
     private_write(session.checkpoint.with_suffix(".json"), payload)
     if not session.checkpoint.exists():
-        session.checkpoint.write_text(f"# Decision in progress\n\n**Question:** {session.question}\n", encoding="utf-8")
+        private_text(session.checkpoint, f"# Decision in progress\n\n**Question:** {session.question}\n")
+    _notify_checkpoint_saved(session)
+
+
+def _notify_checkpoint_saved(session: Session) -> None:
+    if session.json_stream:
+        _emit_json_event(
+            {"type": "checkpoint_saved", "report_path": str(session.checkpoint), "completed_stages": len(session.turns)}
+        )
 
 
 def _checkpoint_payload(session: Session, records: list, brief: Turn | None, config: dict) -> dict:
@@ -1017,7 +1235,9 @@ def _start_journal(session: Session, context: str) -> None:
     _journal_event(
         session,
         "run_started",
-        config={k: v for k, v in session.run_config.items() if k not in {"question", "context_files"}},
+        config={
+            k: v for k, v in session.run_config.items() if k not in {"question", "context_files", "context_snapshot"}
+        },
         question_sha256=fingerprint(session.question),
         environment=environment_facts(),
         resumed_turns=len(session.turns),
