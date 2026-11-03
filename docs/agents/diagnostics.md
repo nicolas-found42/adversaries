@@ -25,9 +25,10 @@ reasoning overhead. New instrumentation cannot reconstruct those missing measure
 | Capability cache | `.council-cache/<hash>.json` | Provider/model limits, reasoning support/controls, provenance, pricing and warnings; refreshed after one hour or a model-catalog refresh |
 
 The Python event journal flushes and fsyncs each record. Checkpoints use an atomic
-replacement. These JSON/journal files are mode 0600, request directories are created
-mode 0700 on POSIX, and reports/cache are gitignored. Existing directory permissions
-are not changed. Native Windows uses the user's filesystem ACLs.
+replacement. These JSON/journal files and the Markdown/HTML reports are mode 0600,
+request directories are created mode 0700 on POSIX, and reports/cache are gitignored.
+A directory that already exists keeps its own mode; only the bridge's own upload
+directory is tightened. Native Windows uses the user's filesystem ACLs.
 
 Engine run-start records include the Python/platform versions, source fingerprints,
 configuration without question/context contents, question/context hashes, and PID.
@@ -36,6 +37,9 @@ input estimate, output allowance, reasoning policy, response/request IDs, finish
 reported usage (including reasoning/cache details when supplied), latency, and cost.
 Errors retain type, HTTP status, safe message, request ID, and stack frame locations
 without local variables or source lines. SDK and application completion retries are off.
+`response_processing_failed` distinguishes response decoding from final-answer validation
+with a `phase` field and the same call ID as the request. A `request_finished` event
+therefore records a received response, not necessarily an accepted final answer.
 
 Provider-reported cost is labeled separately from catalog-derived estimates. Missing
 usage or cost stays unknown, never zero. Estimates do not account reliably for every
@@ -48,8 +52,11 @@ policy, usage, finish reason and cost. Expand **Request details** or **Event his
 for IDs, provenance, warnings and the event sequence. **Copy diagnostics** copies a
 JSON bundle of run/stage metadata; it excludes argument text and request-snapshot
 contents. Private prompt snapshots remain local files for an authorized investigation.
-Known environment credentials and bearer values are redacted; no API headers or raw
-reasoning traces are deliberately stored. Private request snapshots contain the user's
+Known environment credentials and bearer values are redacted; credential variables are
+recognized by whole-word name (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`,
+`*_CREDENTIAL`, `*_AUTHORIZATION`). Values shorter than eight characters are left
+unmatched so a two-letter environment value cannot shred ordinary text. No API headers
+or raw reasoning traces are deliberately stored. Private request snapshots contain the user's
 question/background and must be treated as sensitive project data. Retention is local
 and manual: removing a session's artifacts and its run-ID directory removes its logs
 and snapshots; the shared transport file and capability cache are separate.

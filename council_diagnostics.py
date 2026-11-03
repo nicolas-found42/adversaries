@@ -28,26 +28,77 @@ def scrub(value):
     return _scrub_text(value) if isinstance(value, str) else value
 
 
+# Matched against whole words only, so `completion_tokens` stays a token count
+# while `OPENROUTER_API_KEY`, `GITHUB_TOKEN`, and `DB_PASSWORD` are secrets.
+_SECRET_WORDS = frozenset(
+    {"key", "apikey", "authorization", "cookie", "credential", "credentials", "password", "passwd", "secret", "token"}
+)
+_WORDS = re.compile(r"[^a-z0-9]+")
+_PRIVATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+
+
 def _secret_field(key: str) -> bool:
-    return any(part in key.lower() for part in ("api_key", "authorization", "password", "access_token"))
+    return any(word in _SECRET_WORDS for word in _WORDS.split(key.lower()))
 
 
 def _scrub_text(text: str) -> str:
     for name, value in os.environ.items():
-        if _secret_field(name) and len(value) >= 8:
+        if len(value) >= 8 and _secret_field(name):
             text = text.replace(value, "<redacted>")
     return re.sub(r"(?i)bearer\s+[^\s\"']+", "Bearer <redacted>", text)
 
 
+def private_directory(path: Path) -> None:
+    """Create an owner-only directory; a directory that already exists is left untouched."""
+    try:
+        path.mkdir(parents=True, mode=0o700)
+    except FileExistsError:
+        return
+    os.chmod(path, 0o700)
+
+
 def private_write(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    with temp.open("w", encoding="utf-8") as handle:
-        os.chmod(temp, 0o600)
-        json.dump(scrub(data), handle, ensure_ascii=False, indent=2)
+    private_text(path, json.dumps(scrub(data), ensure_ascii=False, indent=2))
+
+
+def private_text(path: Path, text: str, *, exclusive: bool = False) -> None:
+    """Write scrubbed text at mode 0600. A logical write is replaced atomically unless exclusive."""
+    private_directory(path.parent)
+    cleaned = _scrub_text(text)
+    if exclusive:
+        _write_exclusive(path, cleaned)
+        return
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        _write_private_file(temporary, cleaned)
+        temporary.replace(path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _write_private_file(path: Path, text: str) -> None:
+    descriptor = os.open(path, _PRIVATE_FLAGS, 0o600)
+    _write_descriptor(descriptor, text)
+
+
+def _write_exclusive(path: Path, text: str) -> None:
+    descriptor = os.open(path, _PRIVATE_FLAGS | os.O_EXCL, 0o600)
+    try:
+        _write_descriptor(descriptor, text)
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _write_descriptor(descriptor: int, text: str) -> None:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        tighten = getattr(os, "fchmod", None)  # Absent on Windows; the mode flag already covers POSIX creation.
+        if tighten:
+            tighten(descriptor, 0o600)
+        handle.write(text)
         handle.flush()
         os.fsync(handle.fileno())
-    temp.replace(path)
 
 
 def read_events(path: Path) -> list[dict]:
@@ -99,15 +150,11 @@ def session_diagnostics(journal: Journal | None) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": journal.run_id,
-        "journal_path": str(journal.path),
         "events": read_events(journal.path),
     }
 
 
 def _append_event(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with path.open("a", encoding="utf-8") as handle:
-        os.chmod(path, 0o600)
-        handle.write(json.dumps(scrub(data), ensure_ascii=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    private_directory(path.parent)
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    _write_descriptor(os.open(path, flags, 0o600), json.dumps(scrub(data), ensure_ascii=False) + "\n")

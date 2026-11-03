@@ -1,6 +1,9 @@
 """Behavioral tests for the council pipeline. No API calls: callers are fakes."""
 
+import os
 from pathlib import Path
+
+import pytest
 
 import council
 
@@ -194,3 +197,42 @@ def test_json_stream_keeps_stdout_pure_ndjson(tmp_path: Path, capsys):
     for line in out.out.strip().splitlines():
         council.json.loads(line)
     assert "Included 1 background file(s)" in out.err
+
+
+def test_report_output_is_owner_only_and_the_html_copy_blocks_scripts(tmp_path: Path):
+    turns = council.run_council(session())
+    path = council.write_report("Hire or outsource?", turns, tmp_path / "out", rounds=1)
+    for written in (path, path.with_suffix(".json"), path.with_suffix(".html")):
+        assert written.stat().st_mode & 0o777 == 0o600, written.name
+    assert (tmp_path / "out").stat().st_mode & 0o777 == 0o700
+    html_copy = path.with_suffix(".html").read_text(encoding="utf-8")
+    assert "Content-Security-Policy" in html_copy
+    assert "default-src 'none'" in html_copy
+
+
+def test_export_lines_strip_comments_and_keep_quoted_hashes():
+    names = ("COUNCIL_TEST_EXPORT_A", "COUNCIL_TEST_EXPORT_B", "COUNCIL_TEST_EXPORT_C")
+    try:
+        council._parse_export_line("export COUNCIL_TEST_EXPORT_A=plain # trailing note")
+        council._parse_export_line('export COUNCIL_TEST_EXPORT_B="quoted # kept"')
+        council._parse_export_line("export COUNCIL_TEST_EXPORT_C")
+        council._parse_export_line("export NOT_A NAME=value")
+        assert council.os.environ["COUNCIL_TEST_EXPORT_A"] == "plain"
+        assert council.os.environ["COUNCIL_TEST_EXPORT_B"] == "quoted # kept"
+        assert "COUNCIL_TEST_EXPORT_C" not in council.os.environ
+        assert "NOT_A NAME" not in council.os.environ
+    finally:
+        for name in names:
+            council.os.environ.pop(name, None)
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX mode bits only")
+def test_a_world_readable_env_file_warns_before_keys_are_used(tmp_path: Path, capsys):
+    env = tmp_path / ".env"
+    env.write_text("MISTRAL_API_KEY=fixture\n", encoding="utf-8")
+    env.chmod(0o644)
+    council._warn_if_world_readable(env)
+    assert "chmod 600" in capsys.readouterr().err
+    env.chmod(0o600)
+    council._warn_if_world_readable(env)
+    assert capsys.readouterr().err == ""
