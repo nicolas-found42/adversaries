@@ -1,5 +1,6 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+<meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
   html,
@@ -9,11 +10,79 @@
     background-color: #0c1016;
   }
   canvas {
-    margin: auto;
+    position: fixed;
+    inset: 0 0 var(--view-switch-space, 64px);
+    display: block;
+    margin: 0;
     max-width: 100%;
     width: 100vw;
-    height: 100vh;
+    height: calc(100vh - var(--view-switch-space, 64px));
   }
+  /* eframe inserts its canvas-only IME input immediately after the canvas. */
+  #the_canvas_id + input { position: fixed !important; }
+  html.reading-view #the_canvas_id + input { display: none !important; }
+  #html_controls_toggle {
+    position: fixed; bottom: 8px; right: 12px; z-index: 10000;
+    max-width: calc(100% - 24px); overflow-wrap: anywhere;
+    min-height: 44px; padding: 8px 14px; font: 1rem/1.4 system-ui, sans-serif; border: 1px solid #65758b;
+    border-radius: 8px; background: #19212d; color: #f3f5fa;
+  }
+  html:not(.reading-view) body::after {
+    content: ""; position: fixed; bottom: 0; left: 0; right: 0;
+    height: var(--view-switch-space, 64px); box-sizing: border-box;
+    background: #0c1016; border-top: 1px solid #65758b;
+    z-index: 9998; pointer-events: none;
+  }
+  html.reading-view #html_controls_toggle {
+    position: static; display: block;
+    margin: 12px max(24px, calc((100vw - 52rem) / 2)) 0 auto;
+    max-width: calc(100% - 48px);
+  }
+  #html_controls {
+    position: relative; box-sizing: border-box; min-height: 100vh;
+    padding: 24px 24px 84px; background: #0c1016; color: #eef2f7;
+    font: 1.0625rem/1.6 system-ui, sans-serif;
+  }
+  #html_controls > * { max-width: 52rem; margin-inline: auto; }
+  #html_controls p { white-space: pre-wrap; overflow-wrap: anywhere; }
+  #html_controls button, #html_controls input, #html_controls textarea {
+    box-sizing: border-box; max-width: 100%; font: inherit;
+    min-height: 44px; margin-block: 4px; padding: 8px 12px;
+    background: #19212d; color: #eef2f7; border: 1px solid #65758b; border-radius: 6px;
+  }
+  #html_controls button { overflow-wrap: anywhere; white-space: normal; }
+  #html_controls textarea { width: 100%; min-height: 10rem; }
+  #html_controls input { width: 100%; }
+  #html_controls button[aria-pressed=true] { border: 2px solid #87baff; }
+  #html_controls :disabled { opacity: .6; }
+  #html_controls_toggle:focus-visible, #html_controls :focus-visible { outline: 3px solid #87baff; outline-offset: 3px; }
+  #html_controls .reader-document { min-width: 0; overflow-wrap: anywhere; }
+  #html_controls .reader-document p { white-space: normal; }
+  #html_controls .reader-document a[href] { color: #a9cfff; text-decoration: underline; }
+  #html_controls .reader-document pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #19212d; border-radius: 6px; }
+  #html_controls .reader-document code { white-space: pre-wrap; font-size: .94em; }
+  #html_controls .reader-document blockquote { margin-inline: 0; padding-left: 16px; border-left: 3px solid #65758b; }
+  #html_controls .reader-document ul, #html_controls .reader-document ol { padding-left: 1.6em; }
+  #html_controls .reader-document aside { margin-block: 16px; border-top: 1px solid #65758b; }
+  #html_controls .reader-document table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-block: 16px; }
+  #html_controls .reader-document th, #html_controls .reader-document td { padding: 10px; border: 1px solid #65758b; vertical-align: top; overflow-wrap: anywhere; }
+  #html_controls .reader-cell-label { display: none; }
+  #html_controls .reader-stacked table, #html_controls .reader-stacked tbody, #html_controls .reader-stacked tr, #html_controls .reader-stacked td { display: block; width: auto; }
+  #html_controls .reader-stacked thead { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #html_controls .reader-stacked tbody tr { margin-bottom: 12px; border: 1px solid #65758b; }
+  #html_controls .reader-stacked td { border: 0; border-bottom: 1px solid #65758b; }
+  #html_controls .reader-stacked td:last-child { border-bottom: 0; }
+  #html_controls .reader-stacked .reader-cell-label { display: block; font-weight: 700; }
+  #html_controls .semantic-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  #html_controls .semantic-flow > .semantic-node, #html_controls .semantic-flow > .semantic-node > .semantic-children { display: contents; }
+  #html_controls .semantic-node > div:empty { display: none; }
+  #html_controls .semantic-flow p { margin: 0; }
+  #html_controls nav { padding-bottom: 12px; border-bottom: 1px solid #65758b; margin-bottom: 20px; }
+  #html_controls footer { border-top: 1px solid #65758b; margin-top: 24px; padding-top: 12px; color: #b8bbc3; }
+  #html_controls h1 { font-size: 1.5em; line-height: 1.3; overflow-wrap: anywhere; }
+  #html_controls h2 { font-size: 1.25em; line-height: 1.35; }
+  #html_controls .skip-link { position: absolute; top: 8px; left: 8px; padding: 10px; color: #eef2f7; background: #19212d; z-index: 10001; clip-path: inset(50%); max-width: calc(100% - 16px); box-sizing: border-box; }
+  #html_controls .skip-link:focus { clip-path: none; }
   .center {
     height: 100%;
     display: flex;
@@ -25,9 +94,15 @@
   }
 </style>
 <body>
-  <canvas id="the_canvas_id"></canvas>
-  <div class="center" id="loading_text">
+  <button id="html_controls_toggle" aria-expanded="false" aria-controls="html_controls">Use reading view</button>
+  <div id="html_controls" hidden>
+    <a id="skip_to_workspace" class="skip-link" hidden>Skip to decision content</a>
+    <div id="html_control_tree" role="region" aria-label="Council workspace"></div>
+  </div>
+  <canvas id="the_canvas_id" aria-label="Council visual workspace"></canvas>
+  <div class="center" id="loading_text" role="status" aria-live="polite">
     <h3>Loading Adversarial Council…</h3>
+    <p>This can take a few seconds the first time.</p>
   </div>
   <link data-trunk rel="rust" data-bin="council-ui" data-wasm-opt="2" data-loading-text="Loading Adversarial Council…" />
 </body>

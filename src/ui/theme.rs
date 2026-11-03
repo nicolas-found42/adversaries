@@ -17,6 +17,9 @@ pub struct Theme {
     pub openrouter: Color32,
     pub ollama: Color32,
     pub opencode: Color32,
+    /// Animation and smooth-scroll duration. Zero when the platform reports a
+    /// reduced-motion preference.
+    pub motion_seconds: f32,
 }
 
 impl Default for Theme {
@@ -24,10 +27,11 @@ impl Default for Theme {
         Self {
             bg: Color32::from_rgb(24, 25, 28),
             card_bg: Color32::from_rgb(32, 34, 38),
-            border: Color32::from_rgb(51, 54, 61),
+            // 3.1:1 against `bg`, so control outlines clear WCAG 1.4.11.
+            border: Color32::from_rgb(100, 102, 108),
             border_focus: Color32::from_rgb(129, 161, 238),
             text: Color32::from_rgb(232, 231, 228),
-            text_muted: Color32::from_rgb(159, 162, 170),
+            text_muted: Color32::from_rgb(184, 187, 195),
             accent: Color32::from_rgb(156, 182, 247),
             highlight: Color32::from_rgb(224, 191, 130),
             success: Color32::from_rgb(142, 193, 167),
@@ -37,6 +41,7 @@ impl Default for Theme {
             openrouter: Color32::from_rgb(156, 182, 247),
             ollama: Color32::from_rgb(187, 166, 218),
             opencode: Color32::from_rgb(142, 193, 167),
+            motion_seconds: 0.2,
         }
     }
 }
@@ -74,24 +79,121 @@ impl Theme {
         visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(49, 54, 65);
         ctx.set_visuals(visuals);
         ctx.style_mut_of(egui::Theme::Dark, |style| {
+            style.animation_time = self.motion_seconds;
+            style.scroll_animation = egui::style::ScrollAnimation {
+                duration: egui::Rangef::new(0.0, self.motion_seconds),
+                ..Default::default()
+            };
             style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-            style.spacing.button_padding = egui::vec2(13.0, 8.0);
-            style.spacing.interact_size.y = 32.0;
+            style.spacing.button_padding = egui::vec2(16.0, 10.0);
+            style.spacing.interact_size.y = 44.0;
+            // A scrollbar is the only cue that more content exists below.
+            style.spacing.scroll.floating = false;
+            style.spacing.scroll.bar_width = 10.0;
+            style.spacing.scroll.floating_width = 10.0;
+            style.spacing.scroll.dormant_background_opacity = 0.08;
+            style.spacing.scroll.dormant_handle_opacity = 0.35;
+            style.spacing.scroll.active_handle_opacity = 0.6;
+            // A disabled control has to look unavailable without becoming
+            // unreadable. 0.45 keeps its label above 3:1 on the background.
+            style.visuals.disabled_alpha = 0.45;
+            // egui styles a focused widget with `active`, so give it a ring a
+            // keyboard user can actually see.
+            style.visuals.widgets.active.bg_stroke =
+                Stroke::new(2.0, Color32::from_rgb(156, 182, 247));
+            // A scroll bar paints its handle from the inactive widget fill by
+            // default, which the dark theme leaves near-white. `foreground_color`
+            // switches it to the text tone instead; overriding `bg_fill` would
+            // also fill every checkbox box solid, including "Dry run".
+            style.spacing.scroll.foreground_color = true;
             style
                 .text_styles
-                .insert(TextStyle::Body, FontId::new(15.0, FontFamily::Proportional));
+                .insert(TextStyle::Body, FontId::new(17.0, FontFamily::Proportional));
             style.text_styles.insert(
                 TextStyle::Button,
-                FontId::new(14.0, FontFamily::Proportional),
+                FontId::new(16.0, FontFamily::Proportional),
             );
             style.text_styles.insert(
                 TextStyle::Small,
-                FontId::new(12.0, FontFamily::Proportional),
+                FontId::new(14.0, FontFamily::Proportional),
             );
             style.text_styles.insert(
                 TextStyle::Heading,
                 FontId::new(24.0, FontFamily::Proportional),
             );
         });
+    }
+}
+
+/// Landmarks and flow groups describe the shared interface, independent of its
+/// visual layout. Browser controls consume these same semantics.
+pub(crate) fn region(ui: &egui::Ui, role: egui::accesskit::Role, label: &str) {
+    ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+        node.set_role(role);
+        node.set_label(label);
+    });
+}
+
+pub(crate) fn horizontal_group(ui: &egui::Ui, label: &str) {
+    region(ui, egui::accesskit::Role::Group, label);
+    ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+        node.set_orientation(egui::accesskit::Orientation::Horizontal);
+    });
+}
+
+/// Typography alone does not give egui labels a heading role.
+pub fn heading(ui: &mut egui::Ui, text: impl Into<egui::RichText>) -> egui::Response {
+    let text = text.into();
+    let label = text.text().to_owned();
+    let response = ui.heading(text);
+    mark_heading(ui, &response, &label, 2);
+    response
+}
+
+pub(crate) fn page_heading(ui: &mut egui::Ui, text: impl Into<egui::RichText>) {
+    let response = heading(ui, text);
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_level(1));
+}
+
+pub(crate) fn mark_heading(ui: &egui::Ui, response: &egui::Response, label: &str, level: usize) {
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_role(egui::accesskit::Role::Heading);
+        node.set_level(level);
+        node.set_label(label);
+    });
+}
+
+/// egui's default disclosure title extends onto one line. Pre-wrap its galley
+/// so long labels cannot widen the shared reader or a compact review dialog.
+pub fn disclosure(ui: &egui::Ui, title: impl Into<egui::WidgetText>) -> egui::CollapsingHeader {
+    let width =
+        (ui.available_width() - ui.spacing().indent - ui.spacing().button_padding.x).max(1.0);
+    let galley =
+        title
+            .into()
+            .into_galley(ui, Some(egui::TextWrapMode::Wrap), width, TextStyle::Button);
+    egui::CollapsingHeader::new(galley)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Theme;
+
+    #[test]
+    fn motion_setting_reaches_egui_style() {
+        // `prefers_reduced_motion` sets this field, so the field must be what
+        // egui animates with; asserting on the style proves the seam is wired.
+        let ctx = egui::Context::default();
+        Theme {
+            motion_seconds: 0.0,
+            ..Theme::default()
+        }
+        .apply(&ctx);
+        let still = ctx.style_of(egui::Theme::Dark).animation_time;
+        Theme::default().apply(&ctx);
+        let animated = ctx.style_of(egui::Theme::Dark).animation_time;
+        assert_eq!(still, 0.0, "reduced motion must stop animation");
+        assert_eq!(animated, 0.2, "default motion must animate");
     }
 }

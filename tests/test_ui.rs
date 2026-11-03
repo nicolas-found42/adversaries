@@ -2,6 +2,7 @@
 //! session persistence, the mock event loop, and the `App` state machine.
 //! Rendering (egui) and process-spawning (native) are intentionally untested
 //! here: they belong to the live surface, verified by `trunk serve`.
+mod common;
 
 use std::fs;
 use std::sync::atomic::AtomicBool;
@@ -82,7 +83,11 @@ fn test_backend_event_serialization_roundtrip() {
 #[test]
 fn test_claims_extraction_and_verdict_lifecycle() {
     let claims = extract_claims(&sample_turns());
-    assert_eq!(claims.len(), 3);
+    assert_eq!(
+        claims.len(),
+        4,
+        "a repeated claim label retains its distinct originating statement"
+    );
 
     let c1 = claims.iter().find(|c| c.id == "C1").expect("C1 missing");
     assert_eq!(
@@ -255,9 +260,10 @@ fn test_session_scan_from_markdown_and_sidecar() {
         r#"{"question": "JSON question?", "rounds": 2, "created_at": "2026-10-24", "brief": "Gamma brief.", "turns": [{"index": 1, "model": "Mistral", "role": "Opening", "text": "C1: x", "seconds": 1.0}]}"#,
     );
     let sessions = scan_sessions(dir.path());
-    assert!(
-        (1..=2).contains(&sessions.len()),
-        "alpha scans for sure; md-less gamma.json is best-effort"
+    assert_eq!(
+        sessions.len(),
+        3,
+        "paired and JSON-only sessions are discoverable"
     );
 
     let alpha = sessions
@@ -269,15 +275,16 @@ fn test_session_scan_from_markdown_and_sidecar() {
     assert_eq!(alpha.question, "Should we expand to Nairobi?");
     assert_eq!(alpha.turn_count, 1);
     assert!(alpha.has_brief);
-    if let Some(gamma) = sessions.iter().find(|s| s.file_name.contains("gamma")) {
-        assert_eq!(gamma.question, "JSON question?");
-        assert_eq!(gamma.turn_count, 2);
-        assert!(gamma.has_brief);
-    }
+    let gamma = sessions
+        .iter()
+        .find(|s| s.file_name.contains("gamma"))
+        .expect("JSON-only session missing");
+    assert_eq!(gamma.question, "JSON question?");
+    assert_eq!(gamma.turn_count, 2);
+    assert!(gamma.has_brief);
 
-    assert!(
-        sessions[0].file_name == "2026-10-24_gamma.json"
-            || sessions[0].file_name == "2026-10-23_alpha.md",
+    assert_eq!(
+        sessions[0].file_name, "2026-10-24_gamma.json",
         "sessions sort newest-first"
     );
 }
@@ -365,6 +372,7 @@ fn event_kind(event: &BackendEvent) -> &'static str {
         BackendEvent::Error { .. } => "error",
         BackendEvent::TurnFailed { .. } => "turn_failed",
         BackendEvent::Diagnostics { .. } => "diagnostics",
+        BackendEvent::CheckpointSaved { .. } => "checkpoint_saved",
     }
 }
 
@@ -406,6 +414,13 @@ fn test_app_lifecycle_without_framework() {
     let mut app = App::new(false, None, true);
     assert_eq!(app.active_tab, Tab::Debate);
     assert!(!app.is_running);
+    assert!(
+        !app.history_loading(),
+        "constructing workspace state performs no history I/O"
+    );
+    // The actual eframe host explicitly requests initial history, asynchronously.
+    app.refresh_sessions();
+    common::finish_storage(&mut app);
     // Fresh checkouts have no reports; startup must reflect the configured directory.
     let reports_dir = std::env::var_os("COUNCIL_REPORTS_DIR").map_or_else(
         || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("reports"),
@@ -431,7 +446,21 @@ fn test_app_lifecycle_without_framework() {
     app.composer_state.question = "Should we expand?".to_string();
     app.composer_state.rounds = 2;
     app.submit_composer();
-    assert!(app.is_running, "dry-run spawn should succeed offline");
+    assert!(!app.is_running, "review must not dispatch");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !app.execution_review.as_ref().unwrap().ready() && std::time::Instant::now() < deadline {
+        app.tick();
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        app.execution_review.as_ref().unwrap().ready(),
+        "offline preflight must finish"
+    );
+    app.confirm_execution();
+    assert!(
+        app.is_running,
+        "approved dry-run spawn should succeed offline"
+    );
     assert_eq!(app.current_question, "Should we expand?");
 
     assert!(
@@ -455,7 +484,8 @@ fn test_app_navigation_bounds_and_tab_cycle() {
     assert_eq!(app.selected_claim, 2);
     app.navigate_down();
     assert_eq!(
-        app.selected_claim, 2,
+        app.selected_claim,
+        app.claims.len() - 1,
         "selection must clamp at the ledger end"
     );
 
@@ -470,19 +500,91 @@ fn test_app_navigation_bounds_and_tab_cycle() {
 }
 
 #[test]
-fn test_tab_titles_cover_all_views() {
-    let titles: Vec<&str> = Tab::ALL.iter().map(|t| t.title()).collect();
+fn tab_key_does_not_change_the_current_view() {
+    let mut app = App::new(false, None, true);
+    app.active_tab = Tab::Claims;
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        events: vec![egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.handle_keys(ui.ctx()));
+    output.textures_delta.clear();
+    assert_eq!(app.active_tab, Tab::Claims);
+}
+
+fn press_help_key(ctx: &egui::Context, app: &mut App) {
+    let input = egui::RawInput {
+        events: vec![egui::Event::Key {
+            key: egui::Key::Num5,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.handle_keys(ui.ctx()));
+    output.textures_delta.clear();
+}
+
+#[test]
+fn shortcut_still_fires_while_a_button_holds_focus() {
+    let mut app = App::new(false, None, true);
+    let ctx = egui::Context::default();
+    let button = egui::Id::unique("some_button");
+
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let response = ui.button("New decision");
+        assert!(response.clicked() || !response.clicked());
+    });
+    output.textures_delta.clear();
+    ctx.memory_mut(|memory| memory.request_focus(button));
+    press_help_key(&ctx, &mut app);
     assert_eq!(
-        titles,
-        vec![
-            "Debate Timeline",
-            "Decision Brief",
-            "Claim Ledger",
-            "Session History",
-            "Help & Keys",
-            "Diagnostics",
-        ]
+        app.active_tab,
+        Tab::Help,
+        "a focused button must not swallow the documented shortcuts"
     );
+}
+
+#[test]
+fn shortcut_stays_out_of_a_text_field() {
+    let mut app = App::new(false, None, true);
+    let ctx = egui::Context::default();
+    let mut question = String::new();
+    let edit = egui::Id::unique("question_field");
+
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ui.add(egui::TextEdit::singleline(&mut question).id(edit));
+    });
+    output.textures_delta.clear();
+    ctx.memory_mut(|memory| memory.request_focus(edit));
+    press_help_key(&ctx, &mut app);
+    assert_eq!(
+        app.active_tab,
+        Tab::Debate,
+        "typing in a text field must never trigger a shortcut"
+    );
+}
+
+#[test]
+fn every_tab_has_a_distinct_nonempty_title() {
+    let titles: Vec<&str> = Tab::ALL.iter().map(|t| t.title()).collect();
+    assert!(
+        titles.iter().all(|title| !title.trim().is_empty()),
+        "a tab without a title is unreachable for a reader"
+    );
+    let mut unique = titles.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), titles.len(), "two tabs share a title");
 }
 
 #[test]

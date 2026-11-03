@@ -20,7 +20,15 @@ pub fn render_timeline(ui: &mut Ui, app: &mut App) {
             .strong(),
     );
     ui.add(
-        egui::ProgressBar::new(complete as f32 / app.total_calls.max(1) as f32).desired_height(4.0),
+        egui::ProgressBar::new(complete as f32 / app.total_calls.max(1) as f32)
+            .desired_height(8.0)
+            .fill(app.theme.accent),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(progress_note(complete, app.total_calls, app.is_running))
+            .small()
+            .color(app.theme.text_muted),
     );
     ui.add_space(10.0);
     ScrollArea::vertical()
@@ -84,4 +92,18 @@ fn card(ui: &mut Ui, app: &mut App, idx: usize) {
         app.follow_live = false;
     }
     ui.add_space(4.0);
+}
+
+/// States what the run is doing without claiming work that is not happening:
+/// a finished, stopped, or reopened decision must not read "Working".
+fn progress_note(complete: usize, total: usize, running: bool) -> String {
+    if complete >= total {
+        return "The debate is finished.".to_string();
+    }
+    if !running {
+        return "This run stopped before the end.".to_string();
+    }
+    let left = total - complete;
+    let noun = if left == 1 { "stage" } else { "stages" };
+    format!("Working. {left} {noun} left.")
 }

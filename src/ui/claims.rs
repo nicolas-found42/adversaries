@@ -1,82 +1,95 @@
 use crate::app::App;
 use crate::model::Claim;
-use egui::{Frame, RichText, ScrollArea, Ui};
+use egui::{Frame, RichText, Ui};
 
 pub fn render_claims_view(ui: &mut Ui, app: &mut App) {
-    ui.label(RichText::new("Claims & assumptions").size(22.0).strong());
-    ui.weak("Labels describe model reasoning, not independently verified facts. A matched excerpt confirms the quote exists in your input; it does not verify the conclusion.");
-    ui.add_space(12.0);
+    crate::ui::theme::heading(ui, "Claims & sources");
+    ui.label("These labels describe the debate, not independent verification. An unchallenged claim was simply not challenged. Excerpt matching establishes text occurrence in supplied material, not truth.");
+    ui.add(
+        egui::TextEdit::singleline(&mut app.claim_search)
+            .id_salt("claim_search")
+            .hint_text("Find a claim, author, or debate outcome"),
+    );
     if app.claims.is_empty() {
-        ui.weak("Numbered claims appear here as each argument completes.");
+        ui.label(if app.is_running { "No claims extracted yet. Claims appear after a stage finishes." } else { "No claims were extracted from the completed arguments. Read the arguments to inspect the reasoning." });
         return;
     }
-    ScrollArea::vertical()
-        .id_salt(("claims", &app.current_question))
-        .show(ui, |ui| {
-            for (idx, claim) in app.claims.iter().enumerate() {
-                Frame::new()
-                    .fill(app.theme.card_bg)
-                    .corner_radius(8)
-                    .inner_margin(16)
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal_wrapped(|ui| {
-                            if ui
-                                .selectable_label(
-                                    idx == app.selected_claim,
-                                    RichText::new(&claim.id).strong(),
-                                )
-                                .clicked()
-                            {
-                                app.selected_claim = idx;
-                            }
-                            ui.label(
-                                RichText::new(provenance(claim))
-                                    .small()
-                                    .color(app.theme.accent),
-                            );
-                            ui.label(
-                                RichText::new(claim.verdict.as_str())
-                                    .small()
-                                    .color(app.theme.warning),
-                            );
-                        });
-                        ui.label(&claim.text);
-                        ui.label(
-                            RichText::new(format!(
-                                "Stage {} · {}",
-                                claim.turn_index, claim.author_model
-                            ))
-                            .small()
-                            .color(app.theme.text_muted),
-                        );
-                        if !claim.attackers.is_empty() {
-                            ui.weak(format!("Referenced by: {}", claim.attackers.join(", ")));
-                        }
-                        if ui.small_button("Read source argument").clicked() {
-                            if let Some(index) =
-                                app.turns.iter().position(|t| t.index == claim.turn_index)
-                            {
-                                app.selected_turn = index;
-                                app.active_tab = crate::model::Tab::Debate;
-                                app.follow_live = false;
-                            }
-                        }
-                    });
-                ui.add_space(6.0);
+    let visible = app.visible_claims();
+    let mut open = None;
+    for idx in &visible {
+        ui.push_id(app.claims[*idx].origin_key(), |ui| {
+            if let Some(action) = claim_card(ui, app, *idx) {
+                open = Some(action);
             }
         });
+        ui.add_space(12.0);
+    }
+    if visible.is_empty() {
+        ui.label("No claims match this search. Clear the search to show all claims.");
+    }
+    if let Some((index, focus)) = open {
+        app.inspect_claim(index);
+        app.source_return_focus = Some(focus);
+    }
 }
 
-fn provenance(claim: &Claim) -> &'static str {
+fn claim_card(ui: &mut Ui, app: &mut App, idx: usize) -> Option<(usize, egui::Id)> {
+    let claim = app.claims[idx].clone();
+    let mut open = None;
+    Frame::new().fill(app.theme.card_bg).corner_radius(8).inner_margin(16).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let compact = ui.available_width() < 400.0;
+        let attribution = format!("Stage {} · {}", claim.turn_index, claim.author_model);
+        ui.horizontal_wrapped(|ui| {
+            let choice = ui.selectable_label(idx == app.selected_claim, RichText::new(&claim.id).strong());
+            if app.selection_scroll == Some(crate::model::Tab::Claims) && idx == app.selected_claim {
+                choice.request_focus();
+                choice.scroll_to_me_animation(Some(egui::Align::Center), egui::style::ScrollAnimation::none());
+            }
+            if choice.clicked() { app.selected_claim = idx; }
+            if !compact { ui.label(&attribution); }
+        });
+        if compact { ui.add(egui::Label::new(&attribution).wrap()); }
+        ui.label(clean_claim_text(&claim.text));
+        ui.label(format!("Source relationship: {}", provenance(&claim)));
+        ui.label(format!("Parsed debate outcome: {}", claim.verdict.as_str()));
+        if !claim.ambiguous_references.is_empty() { ui.label("Later references use a reused claim label. Their outcome has not been assigned to this statement."); }
+        if !claim.attackers.is_empty() { ui.label(format!("Referenced by critiques from {}", claim.attackers.join(", "))); }
+        let scope = egui::Id::unique(("claim_inspect", app.workspace_generation, claim.origin_key()));
+        let inspect = ui.scope_builder(egui::UiBuilder::new().scope_id(scope), |ui| ui.button("Inspect statement, challenges and response")).inner;
+        super::restore_source_focus(ui, &mut app.pending_focus, &inspect);
+        if inspect.clicked() { open = Some((idx, inspect.id)); }
+    });
+    open
+}
+
+pub fn clean_claim_text(text: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '[' => depth += 1,
+            ']' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out.replace("**", "")
+        .trim()
+        .trim_start_matches([':', '-', ' '])
+        .trim()
+        .to_owned()
+}
+
+pub fn provenance(claim: &Claim) -> &'static str {
     let text = claim.text.to_uppercase();
     if text.contains("[SOURCE EXCERPT MATCHED]") {
-        "SOURCE EXCERPT MATCHED"
+        "Excerpt found in supplied material; not fact-checked"
     } else if text.contains("[ASSUMPTION") {
-        "MODEL ASSUMPTION"
+        "Model assumption; source not established"
     } else if text.contains("[JUDGEMENT") {
-        "MODEL JUDGEMENT"
+        "Model judgment; not external evidence"
     } else {
-        "UNCLASSIFIED"
+        "Not established"
     }
 }
