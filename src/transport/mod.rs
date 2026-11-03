@@ -33,11 +33,24 @@ pub struct RunConfig {
     pub providers: Vec<String>,
     pub context_files: Vec<String>,
     #[serde(default)]
+    pub context_snapshot: Option<Vec<crate::preflight::DocumentSnapshot>>,
+    #[serde(default)]
     pub roles: std::collections::BTreeMap<String, crate::roles::Selection>,
     #[serde(default)]
     pub completed_turns: Vec<crate::model::TurnState>,
     #[serde(default = "default_attempts")]
     pub max_attempts: u32,
+}
+
+impl RunConfig {
+    pub fn planned_stages(&self) -> usize {
+        let per_round = if self.roles.is_empty() && !self.providers.is_empty() {
+            self.providers.len()
+        } else {
+            4
+        };
+        2 + per_round * self.rounds as usize
+    }
 }
 
 fn default_attempts() -> u32 {
@@ -108,6 +121,40 @@ pub fn engine_command(config: &RunConfig) -> (std::path::PathBuf, Vec<String>) {
     }
 }
 
+/// GUI inputs travel over stdin, keeping long documents out of process arguments.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn engine_json_command(preflight: bool) -> (std::path::PathBuf, Vec<String>) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let python = root.join(if cfg!(windows) {
+        ".venv/Scripts/python.exe"
+    } else {
+        ".venv/bin/python"
+    });
+    let mut args = vec![
+        "council.py".into(),
+        "--config-stdin".into(),
+        "--json-stream".into(),
+    ];
+    if preflight {
+        args.push("--preflight-json".into());
+    }
+    if python.exists() {
+        (python, args)
+    } else {
+        args.insert(0, "run".into());
+        ("uv".into(), args)
+    }
+}
+
+/// The bridge rejects anything a cross-site page can send without a preflight,
+/// so every browser request declares a JSON body explicitly.
+pub fn post_json(url: impl ToString, body: Vec<u8>) -> ehttp::Request {
+    ehttp::Request {
+        headers: ehttp::Headers::new(&[("Accept", "*/*"), ("Content-Type", "application/json")]),
+        ..ehttp::Request::post(url, body)
+    }
+}
+
 type CancelFn = Arc<dyn Fn() + Send + Sync>;
 type PumpFn = Box<dyn FnMut() + Send>;
 
@@ -154,6 +201,12 @@ impl BackendHandle {
             pump();
         }
     }
+}
+
+/// One approval owns one transport identity, retained across HTTP retransmission.
+pub fn new_request_id() -> String {
+    // Browser-safe randomness also separates approvals made in different tabs.
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Start a real council debate: native spawns `council.py`, browser calls the bridge.

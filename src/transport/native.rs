@@ -1,7 +1,7 @@
 //! Native transport: spawns `uv run council.py --json-stream` as a child
 //! process and streams its stdout into the shared event channel.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
@@ -9,19 +9,25 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::model::BackendEvent;
-use crate::transport::{BackendHandle, RunConfig, engine_command};
+use crate::transport::{BackendHandle, RunConfig, engine_json_command};
 
 pub fn spawn(config: RunConfig) -> Result<BackendHandle, String> {
     let (tx, rx) = channel();
     let cancelled = Arc::new(AtomicBool::new(false));
 
-    let mut child = build_command(&config)
+    let mut child = build_command()
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("Failed to launch council.py: {e}"))?;
 
     crate::process_diagnostics::record("native_spawned", Some(child.id()), &config.request_id);
+    let input = serde_json::to_vec(&config).map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("Engine input pipe unavailable")?;
+    thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
     let stdout = child
         .stdout
         .take()
@@ -47,8 +53,8 @@ pub fn spawn(config: RunConfig) -> Result<BackendHandle, String> {
     ))
 }
 
-fn build_command(config: &RunConfig) -> Command {
-    let (program, args) = engine_command(config);
+fn build_command() -> Command {
+    let (program, args) = engine_json_command(false);
     let mut cmd = Command::new(program);
     cmd.args(args);
     cmd.current_dir(env!("CARGO_MANIFEST_DIR"));

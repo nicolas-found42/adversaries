@@ -14,16 +14,15 @@ use ehttp::streaming::Part;
 use crate::model::{BackendEvent, SessionDetail, SessionSummary};
 use crate::transport::{BackendHandle, RunConfig};
 
-pub fn spawn(mut config: RunConfig) -> Result<BackendHandle, String> {
+pub fn spawn(config: RunConfig) -> Result<BackendHandle, String> {
     let (tx, rx) = channel();
     let cancelled = Arc::new(AtomicBool::new(false));
 
-    config.request_id = format!("{}", chrono::Utc::now().timestamp_micros());
     let request_id = config.request_id.clone();
     let body = serde_json::to_vec(&config).map_err(|e| format!("Cannot encode run: {e}"))?;
-    let request = ehttp::Request::post("/api/run", body);
+    let request = crate::transport::post_json("/api/run", body);
 
-    let buffer = Mutex::new(String::new());
+    let buffer = Mutex::new(Vec::new());
     let tx_for_stream = tx.clone();
     let cancelled_for_stream = Arc::clone(&cancelled);
 
@@ -37,7 +36,7 @@ pub fn spawn(mut config: RunConfig) -> Result<BackendHandle, String> {
         Arc::new(move || {
             cancelled_for_cancel.store(true, Ordering::SeqCst);
             let request =
-                ehttp::Request::post(format!("/api/cancel?run_id={request_id}"), Vec::new());
+                crate::transport::post_json(format!("/api/cancel?run_id={request_id}"), Vec::new());
             ehttp::fetch(request, |_| {});
         }),
     ))
@@ -45,20 +44,20 @@ pub fn spawn(mut config: RunConfig) -> Result<BackendHandle, String> {
 
 fn stream_callback(
     result: ehttp::Result<Part>,
-    buffer: &Mutex<String>,
+    buffer: &Mutex<Vec<u8>>,
     tx: &std::sync::mpsc::Sender<BackendEvent>,
     cancelled: &AtomicBool,
 ) -> ControlFlow<()> {
     match result {
         Ok(Part::Response(response)) if !response.ok => {
             let _ = tx.send(BackendEvent::Error {
-                message: format!("Bridge error: HTTP {}", response.status),
+                message: if response.status == 409 { "This execution request was already submitted. Read saved work or review a new run.".into() } else { format!("The Council server could not start this plan (HTTP {}). Review inputs or retry the connection.", response.status) },
             });
             ControlFlow::Break(())
         }
         Ok(Part::Response(_)) => ControlFlow::Continue(()),
         Ok(Part::Chunk(bytes)) => {
-            absorb_chunk(buffer, tx, &String::from_utf8_lossy(&bytes));
+            absorb_chunk(buffer, tx, &bytes);
             if cancelled.load(Ordering::SeqCst) {
                 ControlFlow::Break(())
             } else {
@@ -76,16 +75,22 @@ fn stream_callback(
 
 /// Re-buffers raw stream chunks into complete `data:` lines, then parses
 /// each line's JSON payload into a `BackendEvent`.
-fn absorb_chunk(buffer: &Mutex<String>, tx: &std::sync::mpsc::Sender<BackendEvent>, chunk: &str) {
-    let mut lines: Vec<String> = Vec::new();
+fn absorb_chunk(buffer: &Mutex<Vec<u8>>, tx: &std::sync::mpsc::Sender<BackendEvent>, chunk: &[u8]) {
+    let mut lines = Vec::new();
     if let Ok(mut buf) = buffer.lock() {
-        buf.push_str(chunk);
-        while let Some(pos) = buf.find('\n') {
-            let line: String = buf.drain(..=pos).collect();
-            lines.push(line.trim_end().to_string());
+        buf.extend_from_slice(chunk);
+        while let Some(pos) = buf.iter().position(|byte| *byte == b'\n') {
+            lines.push(buf.drain(..=pos).collect::<Vec<_>>());
         }
     }
     for line in lines {
+        let Ok(line) = String::from_utf8(line) else {
+            let _ = tx.send(BackendEvent::Error {
+                message: "The run stream contained invalid text. Completed stages remain readable."
+                    .into(),
+            });
+            continue;
+        };
         if let Some(data) = line.strip_prefix("data: ")
             && let Ok(event) = serde_json::from_str::<BackendEvent>(data.trim())
         {
@@ -95,14 +100,25 @@ fn absorb_chunk(buffer: &Mutex<String>, tx: &std::sync::mpsc::Sender<BackendEven
 }
 
 /// Async session listing for the browser: `GET /api/sessions`.
-pub fn fetch_sessions_async() -> Receiver<Vec<SessionSummary>> {
+pub fn fetch_sessions_async() -> Receiver<Result<Vec<SessionSummary>, String>> {
     let (tx, rx) = channel();
     ehttp::fetch(ehttp::Request::get("/api/sessions"), move |result| {
         let sessions = result
-            .ok()
-            .filter(|r| r.ok)
-            .and_then(|r| serde_json::from_slice::<Vec<SessionSummary>>(&r.bytes).ok());
-        let _ = tx.send(sessions.unwrap_or_default());
+            .map_err(|_| {
+                "Could not reach saved decisions. Check the Council server, then refresh."
+                    .to_owned()
+            })
+            .and_then(|r| {
+                if !r.ok {
+                    return Err(format!(
+                        "Could not list saved decisions (HTTP {}).",
+                        r.status
+                    ));
+                }
+                serde_json::from_slice(&r.bytes)
+                    .map_err(|_| "The saved-decision list could not be read.".to_owned())
+            });
+        let _ = tx.send(sessions);
     });
     rx
 }
@@ -136,4 +152,22 @@ fn urlencoding_lite(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn utf8_survives_arbitrary_sse_chunk_boundaries() {
+        let buffer = Mutex::new(Vec::new());
+        let (tx, rx) = channel();
+        let event = b"data: {\"type\":\"error\",\"message\":\"\xE2\x82\xAC50 Nairobi\"}\n\n";
+        for byte in event {
+            absorb_chunk(&buffer, &tx, &[*byte]);
+        }
+        let BackendEvent::Error { message } = rx.try_recv().unwrap() else {
+            panic!("Expected event");
+        };
+        assert_eq!(message, "€50 Nairobi");
+    }
 }
