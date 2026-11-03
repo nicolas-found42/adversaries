@@ -43,3 +43,10 @@ web/dist/
 .council-context/
 
 .council-cache/
+
+# Local scratch files written by "Start Council.bat"
+question.txt
+
+# Local design-review artifacts (screenshots, decks, audit tables)
+output/
+.audit/
