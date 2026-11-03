@@ -14,6 +14,7 @@ Council has a Python decision engine and one shared Rust GUI, built with egui/ef
 | Request and event persistence | `council_diagnostics.py` |
 | Application state and events | `src/app.rs`, `src/model.rs` |
 | Shared UI views and theme | `src/ui/` |
+| Markdown reader and GFM tables | `src/ui/reader.rs`, `src/ui/table.rs` |
 | Native, browser, and offline transports | `src/transport/` |
 | HTTP/SSE browser bridge | `src/bin/council-bridge.rs` |
 
@@ -40,7 +41,7 @@ To open the live composer:
 cargo run
 ```
 
-Passing a question starts a run immediately, so use `--dry-run` when testing without a live-call allowance:
+Passing a question opens an execution review. The GUI dispatches only after approval of the displayed plan. Use `--dry-run` for offline engine testing:
 
 ```bash
 cargo run -- "Should we expand our engineering team?"
@@ -71,6 +72,8 @@ trunk serve
 
 Open `http://127.0.0.1:8080`. Edit the Rust views in `src/ui/`; Trunk rebuilds and reloads the browser. The bridge listens on port 8787, and Trunk proxies `/api/*` to it, keeping browser requests same-origin. The native app needs neither server.
 
+The bridge has no authentication, so it treats anything outside the app as hostile: a request is refused unless its `Host` header is a loopback literal (`127.0.0.1`, `localhost`, `[::1]`), any `Origin` header is loopback `http://`, and every `POST` declares `Content-Type: application/json`. That blocks cross-site form posts and DNS rebinding. A manual call must send the header, for example `curl -X POST -H 'Content-Type: application/json' --data '{}' http://127.0.0.1:8787/api/cancel`.
+
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /api/run` | Start a run and receive SSE events |
@@ -79,7 +82,7 @@ Open `http://127.0.0.1:8080`. Edit the Rust views in `src/ui/`; Trunk rebuilds a
 | `GET /api/session?path=…` | Load a saved session |
 | `POST /api/context?name=…` | Store a context attachment |
 
-Browser attachments are stored in ignored `.council-context/` files with a 10 MB limit per upload. The bridge serves session files from the project's `reports/` directory. Use the default reports directory when checking browser history parity.
+Browser attachments are stored in ignored `.council-context/` files with a 10 MB limit per upload. Uploaded files and their directories are owner-only (`0600` file, `0700` directory) on POSIX, and the bridge tightens a directory an earlier build left world-readable. The bridge serves session files from the project's `reports/` directory. Use the default reports directory when checking browser history parity.
 
 `RunConfig.roles` maps `opening`, `critique_1`, `critique_2`, `critique_3`, `rebuttal`, and `brief` to a provider/model object. Native and browser transports pass the same assignments to the engine. See [CLI integration options](cli.md#integration-and-troubleshooting) and [per-role configuration](cli.md#select-providers-or-assign-each-role).
 
@@ -131,3 +134,11 @@ Use mocks and saved-session replay for routine UI and policy checks. Bound live-
 - **The browser cannot start or read sessions:** confirm both terminals are running, ports 8080/8787 are free, and the bridge was started from the repository root.
 
 Further design notes: [Rust UI/live reload research](research/2026-10-23-rust-ui-live-reload.md) and [token/reasoning research](research/2026-10-23-token-budgets-and-reasoning.md).
+
+## Decision workspace
+
+The default reader is focused: global navigation above a single scrolling workspace, with argument chronology co-located with its text. Claims retain full source statements and byte spans. Opening a source retains the return view and its scroll state. Technical timings and raw request records are disclosures.
+
+Start, continue and repeat all open an immutable execution review. Approval is consumed once; changing inputs or retained work requires a fresh review. Continuation passes completed stages; a fresh run does not. A real run discloses recipients, documents, remaining stages and unknown provider charges. Completed-stage progress is never a confidence or consensus score.
+
+The engine emits `checkpoint_saved` only after writing the checkpoint. The UI distinguishes confirmed saved stages from work merely visible in memory. Practice/demo output is synthetic; qualified exports retain the model/verification caveat. Native and WASM use the same views and execution model. See [acceptance inventory](ui-redesign.md).

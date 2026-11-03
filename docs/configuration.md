@@ -15,9 +15,9 @@ Copy `.env.example` from the repository root to `.env`, then enter the keys for 
 
 Unused providers can stay blank. With one account, select that provider for every role in the composer. The default role assignments span all four providers, so change those selections before starting if you only configured one.
 
-The backend loads `.env` beside `council.py`. Existing environment variables take precedence. It also reads simple `export KEY=value` lines from `~/.zshenv` for variables not already set. `OLLAMA_API_KEY` and `OPENCODE_GO_API_KEY` are accepted as key aliases.
+The backend loads `.env` beside `council.py`. Existing environment variables take precedence. It also reads simple `export KEY=value` lines from `~/.zshenv` for variables not already set; quoted values keep their content, an unquoted ` #` starts a comment, and any other shell syntax is ignored rather than guessed at. `OLLAMA_API_KEY` and `OPENCODE_GO_API_KEY` are accepted as key aliases.
 
-Keep `.env` private; it is ignored by Git. Restart the app after changing environment settings and refresh model catalogs. API keys stay in the Python backend environment, including when using the browser preview.
+Keep `.env` private; it is ignored by Git. On POSIX the backend warns when `.env` is group- or world-readable, and `Start Council.bat` restricts the file to the current Windows user. Keys never enter generated files: diagnostics redact the value of any environment variable whose name ends in a credential word (`_API_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`), on top of bearer values, and every file the app writes is created owner-only (`0600`) inside an owner-only directory (`0700`). Restart the app after changing environment settings and refresh model catalogs. API keys stay in the Python backend environment, including when using the browser preview.
 
 ## Choose models
 
@@ -51,6 +51,8 @@ Reports are stored in `reports/` by default:
 - Markdown report: the decision brief followed by the debate.
 - JSON checkpoint: session content, chosen roles, state, and diagnostics.
 - Event journal and request snapshots: evidence for troubleshooting.
+
+Every generated file is written mode `0600`, and directories the app creates are `0700`; the HTML copy is additionally limited by a `default-src 'none'` content-security policy, so model-authored markup cannot run script or load a remote resource. A directory that already exists keeps its own mode, so an older `reports/` stays as it was. Treat the reports directory as sensitive either way.
 
 The CLI's `--out` changes its output directory. Export `COUNCIL_REPORTS_DIR` before launching the native app to change both the backend's default output and native history location; use an absolute path for predictable behavior. Setting it only in `.env` changes Python output but does not set the Rust process environment. The browser bridge's history endpoints currently scan the project's `reports/` directory, so keep the default location for browser preview sessions.
 
