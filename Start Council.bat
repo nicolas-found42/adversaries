@@ -9,14 +9,18 @@ echo   ADVERSARIAL COUNCIL  -  Mistral vs OpenRouter vs Ollama Cloud vs OpenCode
 echo ============================================================
 echo.
 
-rem ---- 1. Find Python (install it if missing) -------------------
+rem ---- 1. Find Python 3.14+ (install it if missing) -------------
 set "PY="
-where py >nul 2>nul && set "PY=py -3"
-if not defined PY ( python --version >nul 2>nul && set "PY=python" )
+for %%C in ("py -3.14" "python") do (
+  if not defined PY (
+    %%~C -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 14) else 1)" >nul 2>nul
+    if not errorlevel 1 set "PY=%%~C"
+  )
+)
 if not defined PY (
-  echo Python is not installed yet. Installing it now - this can take a few minutes...
+  echo Python 3.14 or newer is required. Installing it now - this can take a few minutes...
   echo If Windows asks for permission, click Yes.
-  winget install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements
+  winget install -e --id Python.Python.3.14 --scope user --accept-package-agreements --accept-source-agreements
   echo.
   echo Done. Please CLOSE this window and double-click "Start Council" again.
   pause
@@ -49,6 +53,7 @@ if not exist ".env" (
   >> .env echo OPENROUTER_API_KEY=!ORKEY!
   >> .env echo OLLAMA_CLOUD_API_KEY=!OLKEY!
   >> .env echo OPENCODE_API_KEY=!OCKEY!
+  icacls ".env" /inheritance:r /grant:r "%USERNAME%:F" >nul 2>nul
   echo Keys saved. To change them later, open the file ".env" in this folder with Notepad.
   echo.
 )
@@ -64,6 +69,7 @@ set "Q="
 set /p "Q=Type your decision question, then press Enter: "
 if not defined Q goto ask
 > question.txt echo(!Q!
+icacls "question.txt" /inheritance:r /grant:r "%USERNAME%:F" >nul 2>nul
 
 echo.
 choice /c 12 /n /m "How deep?  Press 1 = Standard (about 3-5 min)   2 = Deep (about 6-10 min): "
@@ -71,6 +77,7 @@ set "R=%errorlevel%"
 
 echo.
 "%VPY%" council.py --file question.txt --rounds %R% --open %CTX%
+del "question.txt" >nul 2>nul
 echo.
 echo The brief has opened in your browser. All reports are kept in the "reports" folder.
 pause
